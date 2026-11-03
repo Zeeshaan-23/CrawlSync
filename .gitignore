@@ -1,0 +1,22 @@
+# Binaries and build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+dist/
+
+# Test binaries
+*.test
+*.out
+
+# Crawler dynamic data
+data/pages/
+data/checkpoints/
+*.tmp
+
+# OS files
+.DS_Store
+Thumbs.db
+
