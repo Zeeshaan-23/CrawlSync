@@ -83,7 +83,10 @@ func TestController_CompleteGraphCrawl(t *testing.T) {
 	}
 
 	mgr := urlmanager.NewManager()
-	ctrl := NewController(cfg, mgr)
+	ctrl, err := NewController(cfg, mgr)
+	if err != nil {
+		t.Fatalf("NewController failed: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -183,7 +186,10 @@ func TestController_MaxPages_SeedOnly(t *testing.T) {
 	}
 
 	mgr := urlmanager.NewManager()
-	ctrl := NewController(cfg, mgr)
+	ctrl, err := NewController(cfg, mgr)
+	if err != nil {
+		t.Fatalf("NewController failed: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -255,7 +261,10 @@ func TestController_MaxPages_Duplicates(t *testing.T) {
 	}
 
 	mgr := urlmanager.NewManager()
-	ctrl := NewController(cfg, mgr)
+	ctrl, err := NewController(cfg, mgr)
+	if err != nil {
+		t.Fatalf("NewController failed: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -308,7 +317,10 @@ func TestController_ActiveDownloadCancellation(t *testing.T) {
 	}
 
 	mgr := urlmanager.NewManager()
-	ctrl := NewController(cfg, mgr)
+	ctrl, err := NewController(cfg, mgr)
+	if err != nil {
+		t.Fatalf("NewController failed: %v", err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -390,7 +402,10 @@ func TestController_PeriodicCheckpointing(t *testing.T) {
 	}
 
 	mgr := urlmanager.NewManager()
-	ctrl := NewController(cfg, mgr)
+	ctrl, err := NewController(cfg, mgr)
+	if err != nil {
+		t.Fatalf("NewController failed: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -442,7 +457,10 @@ func TestWorker_MalformedHTMLNonFatal(t *testing.T) {
 	}
 
 	mgr := urlmanager.NewManager()
-	ctrl := NewController(cfg, mgr)
+	ctrl, err := NewController(cfg, mgr)
+	if err != nil {
+		t.Fatalf("NewController failed: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -455,5 +473,254 @@ func TestWorker_MalformedHTMLNonFatal(t *testing.T) {
 	stats := mgr.GetStats()
 	if stats.Completed < 1 {
 		t.Errorf("expected at least 1 completed page despite malformed HTML, got %d", stats.Completed)
+	}
+}
+
+// TestWorker_PageReplacement_PreservesExistingOnFailure tests that atomic page file replacement
+// preserves the existing destination file if committing the new file fails.
+func TestWorker_PageReplacement_PreservesExistingOnFailure(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "crawlsync_atomic_replace_*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	targetFile := filepath.Join(tempDir, "existing_page.html")
+	originalContent := "<html><body>Original Valid Content</body></html>"
+	if err := os.WriteFile(targetFile, []byte(originalContent), 0644); err != nil {
+		t.Fatalf("failed writing original file: %v", err)
+	}
+
+	// Case 1: Failed replacement when tmpPath does not exist
+	nonExistentTmp := filepath.Join(tempDir, "does_not_exist.tmp")
+	err = replaceFileWithBackup(nonExistentTmp, targetFile, tempDir)
+	if err == nil {
+		t.Fatal("expected error when replacing with non-existent tmpPath, got nil")
+	}
+
+	// Verify original file survived intact with identical content
+	data, err := os.ReadFile(targetFile)
+	if err != nil {
+		t.Fatalf("failed reading targetFile after failed replacement: %v", err)
+	}
+	if string(data) != originalContent {
+		t.Fatalf("original file altered on failure! Got %q, want %q", string(data), originalContent)
+	}
+
+	// Case 2: Successful replacement with valid tmpPath
+	validTmp := filepath.Join(tempDir, "valid_new.tmp")
+	newContent := "<html><body>New Updated Content</body></html>"
+	if err := os.WriteFile(validTmp, []byte(newContent), 0644); err != nil {
+		t.Fatalf("failed writing valid tmp: %v", err)
+	}
+
+	if err := replaceFileWithBackup(validTmp, targetFile, tempDir); err != nil {
+		t.Fatalf("expected successful replacement, got: %v", err)
+	}
+
+	data, err = os.ReadFile(targetFile)
+	if err != nil {
+		t.Fatalf("failed reading targetFile after successful replacement: %v", err)
+	}
+	if string(data) != newContent {
+		t.Fatalf("file content mismatch after replacement: got %q, want %q", string(data), newContent)
+	}
+}
+
+// TestController_ShutdownResultDraining verifies that:
+// 1. A successful worker result buffered in resultsChan immediately before cancellation
+//    is drained and processed before the shutdown checkpoint.
+// 2. The resulting URL is marked completed in the checkpoint.
+// 3. An interrupted worker remains in_progress.
+// 4. Newly discovered links are preserved in the checkpoint as pending.
+func TestController_ShutdownResultDraining(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "crawlsync_drain_test_*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	slowStarted := make(chan struct{})
+	var slowOnce sync.Once
+	fastDone := make(chan struct{})
+	var fastOnce sync.Once
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		switch r.URL.Path {
+		case "/":
+			// Seed page links to /fast and /slow
+			_, _ = fmt.Fprint(w, `<html><body><a href="/fast">Fast</a><a href="/slow">Slow</a></body></html>`)
+		case "/fast":
+			// Fast page downloads quickly and saves to disk
+			_, _ = fmt.Fprint(w, `<html><body><h1>Fast page</h1></body></html>`)
+			fastOnce.Do(func() { close(fastDone) })
+		case "/slow":
+			// Slow page signals start and sleeps until interrupted
+			slowOnce.Do(func() { close(slowStarted) })
+			time.Sleep(3 * time.Second)
+			_, _ = fmt.Fprint(w, `<html><body>Slow</body></html>`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	cfg := Config{
+		StartURL:           ts.URL + "/",
+		WorkerCount:        2,
+		MaxPages:           10,
+		MaxDepth:           3,
+		RequestTimeout:     5 * time.Second,
+		StorageDir:         filepath.Join(tempDir, "pages"),
+		CheckpointDir:      filepath.Join(tempDir, "checkpoints"),
+		CheckpointInterval: 0,
+		SameDomainOnly:     true,
+		AllowLocal:         true,
+	}
+
+	mgr := urlmanager.NewManager()
+	ctrl, err := NewController(cfg, mgr)
+	if err != nil {
+		t.Fatalf("NewController failed: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	runErrChan := make(chan error, 1)
+	go func() {
+		runErrChan <- ctrl.Run(ctx)
+	}()
+
+	// Wait for /slow to start downloading
+	select {
+	case <-slowStarted:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for /slow to start")
+	}
+
+	// Wait until /fast has completed its network download and disk save
+	fastFileSaved := false
+	for i := 0; i < 100; i++ {
+		entries, _ := os.ReadDir(cfg.StorageDir)
+		// StorageDir contains root (/) and /fast once /fast is saved to disk
+		if len(entries) >= 2 {
+			fastFileSaved = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !fastFileSaved {
+		t.Fatal("timed out waiting for /fast to be saved to disk")
+	}
+
+	// Trigger cancellation while /fast result is buffered/processed and /slow is downloading
+	cancel()
+
+	select {
+	case err := <-runErrChan:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("expected context.Canceled, got: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("controller failed to terminate cleanly on cancellation")
+	}
+
+	// Load shutdown checkpoint and verify statuses
+	cpPath := filepath.Join(cfg.CheckpointDir, state.CheckpointFileName)
+	cp, err := state.Load(cpPath)
+	if err != nil {
+		t.Fatalf("failed loading shutdown checkpoint: %v", err)
+	}
+
+	urlStatuses := make(map[string]urlmanager.URLStatus)
+	for _, u := range cp.URLs {
+		urlStatuses[u.Normalized] = u.Status
+	}
+
+	fastNorm, _ := urlmanager.NormalizeURL(ts.URL + "/fast")
+	slowNorm, _ := urlmanager.NormalizeURL(ts.URL + "/slow")
+
+	// 1. /fast must be marked completed in the checkpoint
+	if status, ok := urlStatuses[fastNorm]; !ok || status != urlmanager.StatusCompleted {
+		t.Errorf("expected /fast to be 'completed' in checkpoint, got %s (exists=%t)", status, ok)
+	}
+
+	// 2. /slow must remain in_progress (interrupted worker)
+	if status, ok := urlStatuses[slowNorm]; !ok || status != urlmanager.StatusInProgress {
+		t.Errorf("expected /slow to be 'in_progress' in checkpoint, got %s (exists=%t)", status, ok)
+	}
+}
+
+// TestController_HandleCrawlResult_DrainPolicy verifies that draining a successful CrawlResult:
+// 1. Marks the URL completed with metadata.
+// 2. Records discovered child links as 'pending' in URLManager.
+// 3. Does not dispatch jobs to pendingJobs slice when allowNewPending is false.
+// 4. Preserves in_progress status on interrupted errors.
+func TestController_HandleCrawlResult_DrainPolicy(t *testing.T) {
+	mgr := urlmanager.NewManager()
+	ctrl, err := NewController(Config{
+		StartURL: "https://example.com/",
+		MaxPages: 10,
+		MaxDepth: 3,
+	}, mgr)
+	if err != nil {
+		t.Fatalf("NewController failed: %v", err)
+	}
+
+	// Schedule parent and interrupted URLs
+	_, parentNorm, _ := mgr.TrySchedule("https://example.com/parent", 1)
+	_ = mgr.MarkInProgress(parentNorm)
+	_, interruptedNorm, _ := mgr.TrySchedule("https://example.com/interrupted", 1)
+	_ = mgr.MarkInProgress(interruptedNorm)
+
+	var pendingJobs []Job
+
+	// 1. Process successful result in shutdown/drain mode (allowNewPending = false)
+	successRes := CrawlResult{
+		URL:             parentNorm,
+		Depth:           1,
+		StatusCode:      200,
+		Size:            2048,
+		Duration:        100 * time.Millisecond,
+		SavedPath:       "data/pages/parent.html",
+		DiscoveredLinks: []string{"https://example.com/child_from_drain"},
+		Error:           nil,
+	}
+	ctrl.handleCrawlResult(successRes, &pendingJobs, false)
+
+	// Parent must be completed with metadata
+	item, ok := mgr.GetStatus(parentNorm)
+	if !ok || item.Status != urlmanager.StatusCompleted {
+		t.Errorf("expected parent to be completed, got %v", item)
+	}
+	if item.Size != 2048 || item.SavedPath != "data/pages/parent.html" {
+		t.Errorf("parent metadata mismatch: %+v", item)
+	}
+
+	// Child must be scheduled as pending in URLManager
+	childNorm, _ := urlmanager.NormalizeURL("https://example.com/child_from_drain")
+	childItem, ok := mgr.GetStatus(childNorm)
+	if !ok || childItem.Status != urlmanager.StatusPending {
+		t.Errorf("expected child to be pending in URLManager, got %v", childItem)
+	}
+
+	// But pendingJobs slice must NOT have been appended to (no new jobs during shutdown)
+	if len(pendingJobs) != 0 {
+		t.Errorf("expected pendingJobs to be empty when allowNewPending is false, got %d", len(pendingJobs))
+	}
+
+	// 2. Process interrupted result
+	interruptedRes := CrawlResult{
+		URL:   interruptedNorm,
+		Depth: 1,
+		Error: context.Canceled,
+	}
+	ctrl.handleCrawlResult(interruptedRes, &pendingJobs, false)
+
+	// Interrupted URL must remain in_progress
+	itemInterrupted, ok := mgr.GetStatus(interruptedNorm)
+	if !ok || itemInterrupted.Status != urlmanager.StatusInProgress {
+		t.Errorf("expected interrupted URL to remain in_progress, got %v", itemInterrupted)
 	}
 }

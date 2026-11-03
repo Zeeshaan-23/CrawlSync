@@ -94,3 +94,13 @@
   - Live execution on `go.dev`:
     - Periodic and final checkpoint successfully written to `data/checkpoints/checkpoint.json`.
     - Checkpoint contains schema version 1, unique session ID, crawler config, consistent stats, and 4 URL records with sequence numbers and download metadata.
+
+- **Targeted Improvements & Hardening (Phase 4 Review):**
+  1. *Shutdown Result-Channel Draining:* Refactored result processing into `handleCrawlResult(res, pendingJobs, allowNewPending)`. When `ctx.Done()` fires, `jobsChan` is closed and `c.wg.Wait()` blocks until all workers terminate. Then all remaining results buffered in `resultsChan` are completely drained and processed. Successfully downloaded pages are marked `completed`, newly discovered links are recorded in `URLManager` as `pending` for the final checkpoint without dispatching new jobs (`allowNewPending = false`), and interrupted tasks remain `in_progress`.
+  2. *Atomic Page-File Replacement with Rollback:* Refactored `savePageToDisk()` to use `replaceFileWithBackup()`. When replacing an existing HTML file, the previous file is backed up before moving the temporary file into place. If the replacement fails, the backup is rolled back to restore the original page content, guaranteeing existing pages are never destroyed by failed replacements on Windows or POSIX.
+  3. *Cryptographic Session ID Error Handling:* Updated `GenerateSessionID()` to return `(string, error)`, checking `rand.Read()`. `NewController()` handles this error cleanly, ensuring the crawler never silently runs with insufficient entropy.
+  4. *Test Verification Suite:*
+     - `TestController_ShutdownResultDraining`: Verified buffered results before cancellation are drained and marked `completed` in the shutdown checkpoint, while interrupted workers remain `in_progress`.
+     - `TestController_HandleCrawlResult_DrainPolicy`: Unit test verifying `allowNewPending: false` schedules discovered URLs into `URLManager` without queuing to `pendingJobs`.
+     - `TestWorker_PageReplacement_PreservesExistingOnFailure`: Verified existing page content survives failed replacements.
+     - `TestGenerateSessionID`: Verified unique IDs and entropy error checking.

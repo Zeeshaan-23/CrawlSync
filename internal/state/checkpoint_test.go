@@ -62,7 +62,10 @@ func TestCheckpoint_SerializationAndValidation(t *testing.T) {
 		CapturedAt:   time.Now().UTC(),
 	}
 
-	sessionID := GenerateSessionID()
+	sessionID, err := GenerateSessionID()
+	if err != nil {
+		t.Fatalf("GenerateSessionID failed: %v", err)
+	}
 	cp, err := cm.Save(sessionID, cfg, snap)
 	if err != nil {
 		t.Fatalf("Checkpoint save failed: %v", err)
@@ -255,4 +258,24 @@ func TestCheckpoint_ConcurrentSaves(t *testing.T) {
 		t.Errorf("Final sequence = %d, want %d", loaded.Sequence, numWriters)
 	}
 }
+
+func TestGenerateSessionID(t *testing.T) {
+	seen := make(map[string]bool)
+	const count = 50
+
+	for i := 0; i < count; i++ {
+		id, err := GenerateSessionID()
+		if err != nil {
+			t.Fatalf("GenerateSessionID failed on iteration %d: %v", i, err)
+		}
+		if len(id) < 15 {
+			t.Errorf("GenerateSessionID returned unexpectedly short ID: %s", id)
+		}
+		if seen[id] {
+			t.Errorf("Collision detected in GenerateSessionID: %s", id)
+		}
+		seen[id] = true
+	}
+}
+
 

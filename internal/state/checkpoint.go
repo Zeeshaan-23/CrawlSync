@@ -68,11 +68,14 @@ func NewCheckpointManager(dir string) *CheckpointManager {
 	}
 }
 
-// GenerateSessionID creates a unique session identifier combining a timestamp and random bytes.
-func GenerateSessionID() string {
+// GenerateSessionID creates a unique session identifier combining a timestamp and cryptographically secure random bytes.
+// Returns an error if the operating system's entropy source fails.
+func GenerateSessionID() (string, error) {
 	b := make([]byte, 8)
-	_, _ = rand.Read(b)
-	return fmt.Sprintf("session_%d_%s", time.Now().Unix(), hex.EncodeToString(b))
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("crypto/rand entropy failure: %w", err)
+	}
+	return fmt.Sprintf("session_%d_%s", time.Now().Unix(), hex.EncodeToString(b)), nil
 }
 
 // Save serializes a URLManager snapshot and atomically writes it to disk.

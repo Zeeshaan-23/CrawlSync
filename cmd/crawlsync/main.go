@@ -54,12 +54,16 @@ func main() {
 	}
 
 	mgr := urlmanager.NewManager()
-	ctrl := controller.NewController(cfg, mgr)
+	ctrl, err := controller.NewController(cfg, mgr)
+	if err != nil {
+		fmt.Printf("[Controller ERROR] Initialization failed: %v\n", err)
+		os.Exit(1)
+	}
 
 	fmt.Println("[Controller] Starting crawl session...")
 	startTime := time.Now()
 
-	err := ctrl.Run(ctx)
+	err = ctrl.Run(ctx)
 	duration := time.Since(startTime)
 
 	fmt.Println("--------------------------------------------------")

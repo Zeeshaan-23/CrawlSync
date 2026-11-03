@@ -67,7 +67,7 @@ type Controller struct {
 }
 
 // NewController creates and initializes a Controller with its components.
-func NewController(cfg Config, mgr *urlmanager.Manager) *Controller {
+func NewController(cfg Config, mgr *urlmanager.Manager) (*Controller, error) {
 	if cfg.WorkerCount < 1 {
 		cfg.WorkerCount = 1
 	}
@@ -96,14 +96,19 @@ func NewController(cfg Config, mgr *urlmanager.Manager) *Controller {
 	wp := NewWorkerPool(cfg.WorkerCount, f, cfg.StorageDir, cfg.SameDomainOnly)
 	cm := state.NewCheckpointManager(cfg.CheckpointDir)
 
+	sessID, err := state.GenerateSessionID()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate session id: %w", err)
+	}
+
 	return &Controller{
 		config:            cfg,
-		sessionID:         state.GenerateSessionID(),
+		sessionID:         sessID,
 		urlManager:        mgr,
 		checkpointManager: cm,
 		workerPool:        wp,
 		fetcher:           f,
-	}
+	}, nil
 }
 
 // Run executes the complete crawl lifecycle from start URL until completion condition is met.
@@ -174,9 +179,21 @@ func (c *Controller) Run(ctx context.Context) error {
 			close(jobsChan)
 			c.wg.Wait()
 
-			// OS CONCEPT - GRACEFUL SHUTDOWN & PERSISTENT CHECKPOINT:
-			// After all workers have exited and in-progress jobs have halted,
-			// capture final consistent snapshot to disk before terminating.
+			// OS CONCEPT - SHUTDOWN RESULT DRAINING:
+			// Workers may have finished downloading and saving pages, sending CrawlResult
+			// into the buffered resultsChan right before terminating.
+			// Drain all remaining results so successfully saved pages are marked completed,
+			// their discovered URLs are recorded, and interrupted jobs remain in_progress.
+			for {
+				select {
+				case res := <-resultsChan:
+					inFlight--
+					c.handleCrawlResult(res, &pendingJobs, false)
+				default:
+					goto Drained
+				}
+			}
+		Drained:
 			_ = c.saveCheckpoint("shutdown")
 			return ctx.Err()
 
@@ -196,26 +213,7 @@ func (c *Controller) Run(ctx context.Context) error {
 		case res := <-resultsChan:
 			// Worker returned a result for a completed or failed job
 			inFlight--
-
-			if res.Error != nil {
-				if IsInterruptedError(res.Error) {
-					// Interrupted job: Do NOT mark failed; preserve in_progress status for recovery
-					log.Printf("[Controller INFO] URL processing interrupted for %s: %v", res.URL, res.Error)
-				} else {
-					if err := c.urlManager.MarkFailed(res.URL, res.StatusCode, res.Error); err != nil {
-						log.Printf("[Controller WARN] failed transitioning %s to failed: %v", res.URL, err)
-					}
-				}
-			} else {
-				// Rule 1: Mark completed only when HTML was successfully saved to disk.
-				// Record size, duration, and saved file path metadata.
-				if err := c.urlManager.MarkCompletedWithMetadata(res.URL, res.StatusCode, res.Size, res.Duration, res.SavedPath); err != nil {
-					log.Printf("[Controller WARN] failed transitioning %s to completed: %v", res.URL, err)
-				}
-
-				// Discover and schedule new links
-				c.scheduleDiscoveredLinks(&pendingJobs, res.DiscoveredLinks, res.Depth+1)
-			}
+			c.handleCrawlResult(res, &pendingJobs, true)
 
 		case <-checkpointChan:
 			// OS CONCEPT - CONSISTENT SNAPSHOT BOUNDARY:
@@ -232,10 +230,47 @@ func (c *Controller) Run(ctx context.Context) error {
 	// Wait for all workers to notice EOF on jobsChan and terminate their goroutines
 	c.wg.Wait()
 
+	// Drain any remaining results in channel before saving completion checkpoint
+	for {
+		select {
+		case res := <-resultsChan:
+			inFlight--
+			c.handleCrawlResult(res, &pendingJobs, false)
+		default:
+			goto Finished
+		}
+	}
+Finished:
 	// Capture final checkpoint upon natural crawl completion
 	_ = c.saveCheckpoint("completion")
 
 	return nil
+}
+
+// handleCrawlResult applies the status transition for a finished worker job.
+// If allowNewPending is true, newly discovered links are queued into pendingJobs for worker dispatch.
+// If allowNewPending is false (e.g. during shutdown), newly discovered links are scheduled in the
+// URLManager as 'pending' so they appear in the checkpoint, but not queued for dispatch.
+func (c *Controller) handleCrawlResult(res CrawlResult, pendingJobs *[]Job, allowNewPending bool) {
+	if res.Error != nil {
+		if IsInterruptedError(res.Error) {
+			// Interrupted job: Do NOT mark failed; preserve in_progress status for recovery
+			log.Printf("[Controller INFO] URL processing interrupted for %s: %v", res.URL, res.Error)
+		} else {
+			if err := c.urlManager.MarkFailed(res.URL, res.StatusCode, res.Error); err != nil {
+				log.Printf("[Controller WARN] failed transitioning %s to failed: %v", res.URL, err)
+			}
+		}
+	} else {
+		// Rule 1: Mark completed only when HTML was successfully saved to disk.
+		// Record size, duration, and saved file path metadata.
+		if err := c.urlManager.MarkCompletedWithMetadata(res.URL, res.StatusCode, res.Size, res.Duration, res.SavedPath); err != nil {
+			log.Printf("[Controller WARN] failed transitioning %s to completed: %v", res.URL, err)
+		}
+
+		// Discover and schedule new links
+		c.scheduleDiscoveredLinks(pendingJobs, res.DiscoveredLinks, res.Depth+1, allowNewPending)
+	}
 }
 
 // saveCheckpoint captures a consistent snapshot of the URL Manager and commits it to disk.
@@ -279,7 +314,7 @@ func (c *Controller) CreateCheckpoint() (*state.Checkpoint, error) {
 
 // scheduleDiscoveredLinks filters and schedules newly extracted hyperlinks.
 // Only the Controller modifies the scheduling state; workers only return discovered URLs.
-func (c *Controller) scheduleDiscoveredLinks(pendingJobs *[]Job, links []string, nextDepth int) {
+func (c *Controller) scheduleDiscoveredLinks(pendingJobs *[]Job, links []string, nextDepth int, allowNewPending bool) {
 	// Respect max depth bound
 	if c.config.MaxDepth > 0 && nextDepth > c.config.MaxDepth {
 		return
@@ -296,7 +331,7 @@ func (c *Controller) scheduleDiscoveredLinks(pendingJobs *[]Job, links []string,
 
 		// Atomically attempt to schedule link
 		newlyScheduled, normURL, err := c.urlManager.TrySchedule(link, nextDepth)
-		if err == nil && newlyScheduled {
+		if err == nil && newlyScheduled && allowNewPending && pendingJobs != nil {
 			*pendingJobs = append(*pendingJobs, Job{
 				URL:   normURL,
 				Depth: nextDepth,

@@ -294,14 +294,53 @@ func (wp *WorkerPool) savePageToDisk(pageURL string, body []byte) (string, error
 		return "", fmt.Errorf("close error for %s: %w", tmpPath, err)
 	}
 
-	// On Windows, if destination already exists (e.g. re-crawl), remove it before rename
-	_ = os.Remove(fullPath)
-	if err := os.Rename(tmpPath, fullPath); err != nil {
-		return "", fmt.Errorf("atomic rename failed from %s to %s: %w", tmpPath, fullPath, err)
+	// Commit atomically: preserve existing destination if commit fails
+	if err := replaceFileWithBackup(tmpPath, fullPath, wp.storageDir); err != nil {
+		return "", fmt.Errorf("atomic replacement failed for %s: %w", fullPath, err)
 	}
 
 	committed = true
 	return fullPath, nil
+}
+
+// replaceFileWithBackup atomically replaces targetPath with tmpPath.
+// If targetPath already exists, it is backed up to a temporary file in dir.
+// If renaming tmpPath to targetPath fails, targetPath is restored from the backup to preserve existing data.
+func replaceFileWithBackup(tmpPath, targetPath, dir string) error {
+	targetExists := false
+	if _, err := os.Stat(targetPath); err == nil {
+		targetExists = true
+	}
+
+	var bakPath string
+	if targetExists {
+		bakPattern := fmt.Sprintf("replace-bak-%d-*.tmp", time.Now().UnixNano())
+		bakFile, err := os.CreateTemp(dir, bakPattern)
+		if err != nil {
+			return fmt.Errorf("failed creating backup file: %w", err)
+		}
+		bakPath = bakFile.Name()
+		_ = bakFile.Close()
+		_ = os.Remove(bakPath) // Free the filename for rename
+
+		if err := os.Rename(targetPath, bakPath); err != nil {
+			return fmt.Errorf("failed backing up existing file %s: %w", targetPath, err)
+		}
+	}
+
+	if err := os.Rename(tmpPath, targetPath); err != nil {
+		// Rollback: restore original file from backup if it existed
+		if targetExists {
+			_ = os.Rename(bakPath, targetPath)
+		}
+		return fmt.Errorf("failed committing new file %s: %w", targetPath, err)
+	}
+
+	// Success: clean up temporary backup file
+	if targetExists {
+		_ = os.Remove(bakPath)
+	}
+	return nil
 }
 
 // IsInterruptedError checks whether an error is caused by context cancellation or deadline expiration.
