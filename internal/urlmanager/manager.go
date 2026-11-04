@@ -2,7 +2,11 @@ package urlmanager
 
 import (
 	"fmt"
+	"log"
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -289,4 +293,126 @@ func (m *Manager) GetAllItems() []URLItem {
 		result = append(result, *item)
 	}
 	return result
+}
+
+// RestoreOptions configures the restoration policy when recovering from a checkpoint.
+type RestoreOptions struct {
+	StorageDir  string
+	RetryFailed bool
+}
+
+// Restore reconstructs URLManager state from persisted URL records.
+//
+// OS CONCEPT - STATE RECONSTRUCTION & IDEMPOTENT RECOVERY:
+// 1. Rebuilds the deduplication set and metadata map.
+// 2. Sets nextSequence = max(existing sequence) + 1.
+// 3. Demotes in_progress URLs to pending (interrupted jobs).
+// 4. Verifies completed URLs have matching saved HTML files on disk; demotes missing/empty files to pending.
+// 5. Preserves failed URLs unless RetryFailed is true.
+func (m *Manager) Restore(records []URLItem, opts RestoreOptions) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.urls = make(map[string]*URLItem, len(records))
+	maxSeq := int64(0)
+	now := time.Now()
+
+	for _, rec := range records {
+		if rec.Sequence > maxSeq {
+			maxSeq = rec.Sequence
+		}
+
+		item := rec
+		switch item.Status {
+		case StatusInProgress:
+			// Unfinished or interrupted jobs are demoted to pending for retry
+			item.Status = StatusPending
+			item.UpdatedAt = now
+
+		case StatusCompleted:
+			// Ensure HTML page file actually exists on storage media and cannot escape via symlink
+			demote := false
+			if opts.StorageDir != "" {
+				if item.SavedPath == "" {
+					demote = true
+				} else {
+					normalizedSaved := filepath.FromSlash(strings.ReplaceAll(item.SavedPath, "\\", "/"))
+					absStorage, err1 := filepath.Abs(opts.StorageDir)
+					absSaved, err2 := filepath.Abs(normalizedSaved)
+					if err1 != nil || err2 != nil {
+						demote = true
+					} else {
+						rel, errRel := filepath.Rel(absStorage, absSaved)
+						if errRel != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) || filepath.Dir(absSaved) != absStorage {
+							demote = true
+						} else {
+							realStorage, errS := filepath.EvalSymlinks(absStorage)
+							if errS != nil {
+								realStorage = absStorage
+							}
+							if realSaved, errSym := filepath.EvalSymlinks(absSaved); errSym == nil {
+								relTarget, errTarget := filepath.Rel(realStorage, realSaved)
+								if errTarget != nil || strings.HasPrefix(relTarget, "..") || filepath.IsAbs(relTarget) {
+									log.Printf("[URLManager SECURITY] SavedPath symlink %s escapes storage dir; demoting to pending", item.SavedPath)
+									demote = true
+								}
+							}
+						}
+					}
+					if !demote {
+						fi, err := os.Stat(item.SavedPath)
+						if err != nil || fi.Size() == 0 {
+							demote = true
+						}
+					}
+				}
+			}
+
+			if demote {
+				log.Printf("[URLManager NOTICE] Completed page %s missing from storage; demoting to pending", item.Normalized)
+				item.Status = StatusPending
+				item.SavedPath = ""
+				item.Size = 0
+				item.DurationMs = 0
+				item.StatusCode = 0
+				item.UpdatedAt = now
+			}
+
+		case StatusFailed:
+			if opts.RetryFailed {
+				log.Printf("[URLManager NOTICE] Retrying failed URL %s; demoting to pending", item.Normalized)
+				item.Status = StatusPending
+				item.ErrorMessage = ""
+				item.StatusCode = 0
+				item.UpdatedAt = now
+			}
+
+		case StatusPending:
+			// Retain pending
+		}
+
+		m.urls[item.Normalized] = &item
+	}
+
+	m.nextSequence = maxSeq + 1
+	return nil
+}
+
+// GetPendingItems returns all URLs currently in pending state, sorted strictly by discovery sequence ascending.
+func (m *Manager) GetPendingItems() []URLItem {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var pending []URLItem
+	for _, item := range m.urls {
+		if item.Status == StatusPending {
+			pending = append(pending, *item)
+		}
+	}
+
+	sort.Slice(pending, func(i, j int) bool {
+		return pending[i].Sequence < pending[j].Sequence
+	})
+
+	return pending
 }

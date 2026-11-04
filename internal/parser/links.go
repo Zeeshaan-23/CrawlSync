@@ -82,7 +82,7 @@ func ExtractLinks(body io.Reader, baseRawURL string, opts ParseOptions) ([]strin
 
 				// Enforce same-domain policy if requested
 				if opts.SameDomainOnly {
-					if !isSameDomain(base.Hostname(), resolvedURL.Hostname()) {
+					if !IsSameDomain(base.Hostname(), resolvedURL.Hostname()) {
 						continue
 					}
 				}
@@ -97,8 +97,8 @@ func ExtractLinks(body io.Reader, baseRawURL string, opts ParseOptions) ([]strin
 	}
 }
 
-// isSameDomain checks whether two hostnames match exactly or share the same base domain.
-func isSameDomain(baseHost, targetHost string) bool {
+// IsSameDomain checks whether two hostnames match exactly or share the same base domain.
+func IsSameDomain(baseHost, targetHost string) bool {
 	baseHost = strings.ToLower(strings.TrimPrefix(baseHost, "www."))
 	targetHost = strings.ToLower(strings.TrimPrefix(targetHost, "www."))
 	return baseHost == targetHost

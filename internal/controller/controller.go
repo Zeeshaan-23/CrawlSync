@@ -62,6 +62,10 @@ type Config struct {
 	CheckpointInterval time.Duration
 	SameDomainOnly     bool
 	AllowLocal         bool
+	SessionID          string        // Preserves session ID across recovery
+	CumulativeElapsed time.Duration // Cumulative elapsed runtime from previous sessions
+	InitialSequence    int64         // Checkpoint sequence to resume monotonically from
+	IsResumed          bool          // Indicates this is a resumed crawl session
 }
 
 // DefaultConfig provides sensible defaults for an academic crawling session.
@@ -103,14 +107,17 @@ type Controller struct {
 	// Synchronization & Goroutine management
 	wg sync.WaitGroup
 
-	// Runtime control & state management (Phase 5)
-	stateMu     sync.RWMutex
-	state       ControllerState
-	started     bool
-	controlChan chan controlRequest
-	doneChan    chan struct{}
-	doneOnce    sync.Once
-	stopCancel  context.CancelFunc
+	// Runtime control & state management (Phase 5 & 6)
+	stateMu           sync.RWMutex
+	state             ControllerState
+	started           bool
+	controlChan       chan controlRequest
+	doneChan          chan struct{}
+	doneOnce          sync.Once
+	stopCancel        context.CancelFunc
+	cumulativeElapsed time.Duration
+	sessionStartTime  time.Time
+	isResumed         bool
 }
 
 // NewController creates and initializes a Controller with its components.
@@ -142,10 +149,17 @@ func NewController(cfg Config, mgr *urlmanager.Manager) (*Controller, error) {
 
 	wp := NewWorkerPool(cfg.WorkerCount, f, cfg.StorageDir, cfg.SameDomainOnly)
 	cm := state.NewCheckpointManager(cfg.CheckpointDir)
+	if cfg.InitialSequence > 0 {
+		cm.SetSaveCount(cfg.InitialSequence)
+	}
 
-	sessID, err := state.GenerateSessionID()
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate session id: %w", err)
+	sessID := cfg.SessionID
+	if sessID == "" {
+		var err error
+		sessID, err = state.GenerateSessionID()
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate session id: %w", err)
+		}
 	}
 
 	return &Controller{
@@ -158,6 +172,8 @@ func NewController(cfg Config, mgr *urlmanager.Manager) (*Controller, error) {
 		state:             StateReady,
 		controlChan:       make(chan controlRequest, 10),
 		doneChan:          make(chan struct{}),
+		cumulativeElapsed: cfg.CumulativeElapsed,
+		isResumed:         cfg.IsResumed,
 	}, nil
 }
 
@@ -187,6 +203,7 @@ func (c *Controller) Run(parentCtx context.Context) error {
 	if !isInitiallyPaused {
 		c.state = StateRunning
 	}
+	c.sessionStartTime = time.Now()
 	c.stopCancel = cancel
 	c.stateMu.Unlock()
 
@@ -197,14 +214,34 @@ func (c *Controller) Run(parentCtx context.Context) error {
 		c.closeDone()
 	}()
 
-	// 1. Normalize and schedule initial seed URL
-	sched, normStartURL, err := c.urlManager.TrySchedule(c.config.StartURL, 0)
-	if err != nil {
-		return fmt.Errorf("failed to schedule seed URL: %w", err)
-	}
-	if !sched {
-		// If seed URL was already scheduled or completed (e.g. after restore), proceed
-		normStartURL, _ = urlmanager.NormalizeURL(c.config.StartURL)
+	// 1. Initialize pendingJobs queue
+	// OS CONCEPT - STATE RECONSTRUCTION & RESUME:
+	// In a fresh crawl, the seed URL is scheduled into URLManager and added to pendingJobs.
+	// In a recovered session, pendingJobs is reconstructed strictly from URLManager's pending items,
+	// ordered deterministically by discovery sequence.
+	var pendingJobs []Job
+
+	if !c.isResumed {
+		sched, normStartURL, err := c.urlManager.TrySchedule(c.config.StartURL, 0)
+		if err != nil {
+			return fmt.Errorf("failed to schedule seed URL: %w", err)
+		}
+		if sched {
+			pendingJobs = append(pendingJobs, Job{URL: normStartURL, Depth: 0})
+		}
+	} else {
+		pendingItems := c.urlManager.GetPendingItems()
+		for _, item := range pendingItems {
+			pendingJobs = append(pendingJobs, Job{
+				URL:   item.Normalized,
+				Depth: item.Depth,
+			})
+		}
+
+		if len(pendingJobs) == 0 {
+			log.Println("[Controller] Session is already complete; no pending tasks remaining.")
+			return nil
+		}
 	}
 
 	// 2. Setup communication channels (Producer-Consumer Buffer)
@@ -221,13 +258,6 @@ func (c *Controller) Run(parentCtx context.Context) error {
 		defer ticker.Stop()
 		checkpointChan = ticker.C
 	}
-
-	// 5. Initialize internal scheduling state
-	// Clear separation between:
-	// - pendingJobs: URLs queued in controller memory waiting for an open slot in jobsChan
-	// - inFlight: URLs dispatched to jobsChan or currently executing on a worker
-	var pendingJobs []Job
-	pendingJobs = append(pendingJobs, Job{URL: normStartURL, Depth: 0})
 
 	inFlight := 0
 	paused := isInitiallyPaused
@@ -534,9 +564,15 @@ func (c *Controller) doSaveCheckpoint(reason string) (*state.Checkpoint, error) 
 		MaxDepth:       c.config.MaxDepth,
 		RequestTimeout: c.config.RequestTimeout.String(),
 		SameDomainOnly: c.config.SameDomainOnly,
+		StorageDir:     c.config.StorageDir,
 	}
 
-	cp, err := c.checkpointManager.Save(c.sessionID, checkpointCfg, snap)
+	totalElapsed := c.cumulativeElapsed
+	if !c.sessionStartTime.IsZero() {
+		totalElapsed += time.Since(c.sessionStartTime)
+	}
+
+	cp, err := c.checkpointManager.Save(c.sessionID, checkpointCfg, snap, totalElapsed)
 	if err != nil {
 		log.Printf("[Checkpoint WARN] Failed saving %s checkpoint: %v", reason, err)
 		return nil, err
@@ -612,6 +648,21 @@ func (c *Controller) scheduleDiscoveredLinks(pendingJobs *[]Job, links []string,
 // SessionID returns the unique session identifier for this crawl session.
 func (c *Controller) SessionID() string {
 	return c.sessionID
+}
+
+// CumulativeElapsed returns total crawl runtime across original and recovered sessions.
+func (c *Controller) CumulativeElapsed() time.Duration {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	if c.sessionStartTime.IsZero() {
+		return c.cumulativeElapsed
+	}
+	return c.cumulativeElapsed + time.Since(c.sessionStartTime)
+}
+
+// IsResumed reports whether this controller was initialized as a recovered session.
+func (c *Controller) IsResumed() bool {
+	return c.isResumed
 }
 
 // CheckpointManager returns the associated CheckpointManager.

@@ -31,17 +31,19 @@ type CheckpointConfig struct {
 	MaxDepth       int    `json:"maxDepth"`
 	RequestTimeout string `json:"requestTimeout"`
 	SameDomainOnly bool   `json:"sameDomainOnly"`
+	StorageDir     string `json:"storageDir,omitempty"`
 }
 
 // Checkpoint represents the complete serialized state of a crawl session.
 type Checkpoint struct {
-	Version   int                  `json:"version"`
-	SessionID string               `json:"sessionId"`
-	CreatedAt time.Time            `json:"createdAt"`
-	Sequence  int64                `json:"sequence"`
-	Config    CheckpointConfig     `json:"config"`
-	Stats     urlmanager.Stats     `json:"stats"`
-	URLs      []urlmanager.URLItem `json:"urls"`
+	Version           int                  `json:"version"`
+	SessionID         string               `json:"sessionId"`
+	CreatedAt         time.Time            `json:"createdAt"`
+	Sequence          int64                `json:"sequence"`
+	CumulativeElapsed time.Duration        `json:"cumulativeElapsed,omitempty"`
+	Config            CheckpointConfig     `json:"config"`
+	Stats             urlmanager.Stats     `json:"stats"`
+	URLs              []urlmanager.URLItem `json:"urls"`
 }
 
 // CheckpointManager handles serialization, atomic file writing, backup rotation,
@@ -80,21 +82,27 @@ func GenerateSessionID() (string, error) {
 
 // Save serializes a URLManager snapshot and atomically writes it to disk.
 // The previous valid checkpoint is preserved as checkpoint.prev.json.
-func (cm *CheckpointManager) Save(sessionID string, cfg CheckpointConfig, snap urlmanager.Snapshot) (*Checkpoint, error) {
+func (cm *CheckpointManager) Save(sessionID string, cfg CheckpointConfig, snap urlmanager.Snapshot, elapsed ...time.Duration) (*Checkpoint, error) {
 	// SERIALIZE WRITES: Only one checkpoint operation executes at any time
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 
 	cm.saveCount++
 
+	var cumElapsed time.Duration
+	if len(elapsed) > 0 {
+		cumElapsed = elapsed[0]
+	}
+
 	cp := &Checkpoint{
-		Version:   SchemaVersion,
-		SessionID: sessionID,
-		CreatedAt: time.Now().UTC(),
-		Sequence:  cm.saveCount,
-		Config:    cfg,
-		Stats:     snap.Stats,
-		URLs:      snap.URLs,
+		Version:           SchemaVersion,
+		SessionID:         sessionID,
+		CreatedAt:         time.Now().UTC(),
+		Sequence:          cm.saveCount,
+		CumulativeElapsed: cumElapsed,
+		Config:            cfg,
+		Stats:             snap.Stats,
+		URLs:              snap.URLs,
 	}
 
 	data, err := json.MarshalIndent(cp, "", "  ")
@@ -222,6 +230,13 @@ func (cm *CheckpointManager) SaveCount() int64 {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 	return cm.saveCount
+}
+
+// SetSaveCount sets the checkpoint save counter across session recovery.
+func (cm *CheckpointManager) SetSaveCount(seq int64) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	cm.saveCount = seq
 }
 
 // GetDirectory returns the configured checkpoint directory.

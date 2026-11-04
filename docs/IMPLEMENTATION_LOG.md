@@ -183,3 +183,79 @@
   - `go vet ./...`: PASSED (0 warnings)
   - `go test -v ./...`: ALL PASSED across all packages (20 controller tests/subtests, 4 fetcher tests, all parser subtests, 5 state tests, all urlmanager subtests)
   - `go test -count=1 -race ./...`: ALL PASSED (0 data races detected)
+
+---
+
+## Phase 6: Recovery After Interruption
+
+### Implementation Summary
+- **Untrusted Input Validation & Filesystem Safety (`internal/state/recovery.go`):**
+  - Implemented `ValidateForRecovery(cp *Checkpoint, opts RecoveryValidationOptions) error`:
+    - Strict schema version checking (`Version == CurrentVersion`).
+    - Validates strictly positive, unique URL sequence numbers.
+    - Validates URL syntax (scheme must be `http` or `https`), canonical normalization matches stored representation, and domain restriction (`IsSameDomain` against checkpoint seed URL).
+    - Prevents SSRF / private IP access on restored URLs unless explicitly permitted via `AllowLocal`.
+    - Prevents directory traversal attacks: validates that all completed URLs have `SavedPath` residing strictly within `StorageDir` and within the expected page directory (`filepath.Dir(absSaved) == absStorage`).
+    - Enforces depth limits (`0 <= Depth <= MaxDepth`).
+  - Implemented `LoadWithFallback(dir string, opts RecoveryValidationOptions) (*Checkpoint, bool, error)`:
+    - If `checkpoint.json` does not exist, returns clear `ErrNoCheckpoint` without falling back.
+    - If `checkpoint.json` exists but is corrupt or fails validation, renames it to `checkpoint.corrupt.<timestamp>`, logs a warning, and falls back to `checkpoint.prev.json`.
+    - If both files are missing or corrupt, recovery is strictly refused.
+- **Checkpoint Sequence Restoration (`internal/state/checkpoint.go`):**
+  - Added `SetSaveCount(seq int64)` to `CheckpointManager` so that recovered sessions resume checkpoint numbering at `cp.Sequence`.
+  - Ensures the first checkpoint written after recovery has `Sequence = cp.Sequence + 1`, maintaining strict monotonic sequence ordering across crashes and restarts.
+  - Added `CumulativeElapsed time.Duration` (JSON `cumulativeElapsed,omitempty`) to `Checkpoint` struct to track total active runtime across multiple process interruptions.
+- **URL Manager Restoration (`internal/urlmanager/manager.go`):**
+  - Added `RestoreOptions{StorageDir, RetryFailed}` and `Restore(records []URLItem, opts RestoreOptions) error`.
+  - Reconstructs internal deduplication map and metadata.
+  - Sets `nextSequence = max(existing sequence) + 1` ensuring future discovered URLs receive strictly higher sequence numbers.
+  - Demotes `in_progress` URLs to `pending` so interrupted downloads are safely retried.
+  - Verifies completed URLs have valid non-empty files on disk; demotes missing/zero-length files to `pending`.
+  - Preserves `failed` URLs unless `RetryFailed: true` is passed, in which case failed URLs are demoted to `pending`.
+  - Implemented `GetPendingItems() []URLItem` returning pending records sorted deterministically by `Sequence` ascending.
+- **Controller Recovery Lifecycle (`internal/controller/controller.go`):**
+  - Added `SessionID`, `CumulativeElapsed`, `InitialSequence`, and `IsResumed` fields to `Config` and `Controller`.
+  - In `Run()`:
+    - Reconstructs `pendingJobs` from `c.urlManager.GetPendingItems()`.
+    - Detects completed crawls before starting workers: if `len(pendingJobs) == 0 && inFlight == 0`, logs `"Session is already complete; no pending tasks remaining."` and exits cleanly without spawning worker pools.
+    - Tracks active session elapsed time and accumulates into `CumulativeElapsed` during periodic, shutdown, and completion checkpoints.
+    - Fully compatible with `Pause()`, `Resume()`, and `Stop()`.
+- **CLI Flag Integration (`cmd/crawlsync/main.go`):**
+  - Added `--resume` (`bool`) and `--retry-failed` (`bool`) CLI flags.
+  - Uses `flag.Visit` to dynamically detect which CLI flags were explicitly provided by the user.
+  - Restores configuration from checkpoint (seed URL, same-domain, max pages, max depth), overriding only flags explicitly supplied on CLI (`-workers`, `-interval`, `--allow-local`, etc.).
+  - Emits clear startup banners indicating recovery status, restored session ID, completed/pending/failed counts, and cumulative runtime.
+
+### Automated Test Suite
+- **Recovery & Validation Tests (`internal/state/recovery_test.go`):**
+  - `TestRecovery_MissingPrimary_FailsWithoutFallback`: verifies missing primary does not fall back to `.prev`.
+  - `TestRecovery_CorruptPrimary_FallbackToBackup`: verifies primary corruption quarantines file to `.corrupt.<timestamp>` and loads `.prev`.
+  - `TestRecovery_BothCorrupt_FailsSafely`: verifies recovery refusal when both files fail.
+  - `TestRecovery_Validation_OutOfDomainRejected`: rejects URLs outside allowed seed domain.
+  - `TestRecovery_Validation_NonHTTPRejected`: rejects `ftp://` or other schemes.
+  - `TestRecovery_Validation_PrivateIPBlockedUnlessAllowed`: blocks SSRF unless `--allow-local` is set.
+  - `TestRecovery_Validation_PathTraversalRejected`: blocks Unix-style directory traversal attempts in `SavedPath`.
+  - `TestRecovery_Validation_DuplicateSequenceRejected`: rejects duplicate sequences.
+  - `TestRecovery_Validation_NonPositiveSequenceRejected`: rejects sequence `<= 0`.
+  - `TestRecovery_Validation_DepthExceededRejected`: rejects URL depth exceeding `MaxDepth`.
+  - `TestRecovery_LoadWithFallback_EmptyPrimaryFallsBackToBackup`: verifies empty 0-byte primary file quarantines and falls back to backup.
+  - `TestRecovery_LoadWithFallback_TruncatedJSONFallsBackToBackup`: verifies truncated JSON primary quarantines and falls back to backup.
+  - `TestRecovery_Validation_UnsupportedVersionRejected`: rejects unsupported schema versions (`Version != 1`).
+  - `TestRecovery_Validation_SymlinkEscapeRejected`: rejects symlinks in `SavedPath` that resolve outside the storage directory.
+  - `TestRecovery_Validation_WindowsPathTraversalRejected`: rejects Windows-style backslash traversal attempts (`..\..\`).
+- **Controller Recovery Tests (`internal/controller/recovery_test.go`):**
+  - `TestRecovery_CrashSimulationAndFullGraphCompletion`: end-to-end multi-cycle crash simulation, state recovery, and full graph completion.
+  - `TestRecovery_InProgressRestoredToPending`: verifies in-progress tasks are reset to pending.
+  - `TestRecovery_PendingOrderPreservesDiscoverySequence`: verifies restored queue is sorted by sequence ascending.
+  - `TestRecovery_MissingSavedFileDemotedToPending`: verifies missing files on disk trigger demotion to pending.
+  - `TestRecovery_NextSequenceExceedsEveryExistingSequence`: verifies monotonic sequence numbers after recovery.
+  - `TestRecovery_FailedURLs_PreservedByDefault`: verifies failed URLs stay failed.
+  - `TestRecovery_FailedURLs_RetriedWithFlag`: verifies `--retry-failed` demotes failed URLs to pending.
+  - `TestRecovery_CumulativeElapsedAcrossMultipleCycles`: verifies runtime duration accumulates across recovery cycles.
+  - `TestRecovery_AlreadyCompleteSession_DoesNotStartWorkers`: verifies clean exit without starting worker pools.
+  - `TestRecovery_CompatibleWithPauseResumeStop`: verifies runtime pause/resume/stop work seamlessly after recovery.
+
+### Verification Output
+- `go vet ./...`: PASSED (0 warnings)
+- `go test -v ./...`: ALL PASSED across all packages (31 controller tests with 33 PASS lines, 4 fetcher tests, all parser subtests, 19 state tests, all urlmanager subtests)
+- `go test -count=1 -race ./...`: ALL PASSED (0 data races detected)
