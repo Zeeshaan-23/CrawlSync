@@ -113,7 +113,7 @@ func main() {
 			SameDomainOnly:     cp.Config.SameDomainOnly,
 			AllowLocal:         *allowLocal, // Safety permissions come strictly from CLI
 			SessionID:          cp.SessionID,
-			CumulativeElapsed: cp.CumulativeElapsed,
+			CumulativeElapsed:  cp.CumulativeElapsed,
 			InitialSequence:    cp.Sequence,
 			IsResumed:          true,
 		}
@@ -204,10 +204,11 @@ func main() {
 // Priority:
 // 1. Explicitly provided -checkpoint-dir flag.
 // 2. Candidate directory containing checkpoint.json:
-//    - <storageDir>/../checkpoints
-//    - <storageDir>/checkpoints
-//    - <storageDir>
-//    - data/checkpoints
+//   - <storageDir>/../checkpoints
+//   - <storageDir>/checkpoints
+//   - <storageDir>
+//   - data/checkpoints
+//
 // 3. Fallback default: <storageDir>/../checkpoints
 func resolveCheckpointDir(cliCheckpointDir, cliStorageDir string, explicitCheckpointDir bool) string {
 	if explicitCheckpointDir && cliCheckpointDir != "" {
@@ -268,9 +269,9 @@ func runServerMode(host string, port int, storageDir, checkpointDir string, work
 	}
 
 	fmt.Println("==================================================")
-	fmt.Println(" CrawlSync - Phase 7 REST API Server Mode")
+	fmt.Println(" CrawlSync - Phase 8 Server & Dashboard Mode")
 	fmt.Println("==================================================")
-	fmt.Printf("Bind Address:        http://%s\n", srv.Addr())
+	fmt.Printf("Dashboard URL:       http://%s/\n", srv.Addr())
 	fmt.Printf("Storage Directory:   %s\n", storageDir)
 	fmt.Printf("Checkpoint Directory:%s\n", checkpointDir)
 	fmt.Printf("Default Workers:     %d\n", workers)
@@ -278,6 +279,7 @@ func runServerMode(host string, port int, storageDir, checkpointDir string, work
 	fmt.Printf("Allow Local IPs:     %t\n", allowLocal)
 	fmt.Println("--------------------------------------------------")
 	fmt.Println("Endpoints:")
+	fmt.Println("  GET  /                     - CrawlSync Dashboard UI")
 	fmt.Println("  POST /api/crawl/start      - Start or resume a crawl")
 	fmt.Println("  GET  /api/crawl/status     - Get current crawl status")
 	fmt.Println("  GET  /api/crawl/stats      - Get crawl statistics")

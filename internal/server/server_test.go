@@ -154,7 +154,7 @@ func TestServer_StatusEndpointRespondsOverActualHTTP(t *testing.T) {
 	}
 
 	var apiResp struct {
-		Success bool                `json:"success"`
+		Success bool                   `json:"success"`
 		Data    CrawlStatusResponseDTO `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
@@ -595,8 +595,8 @@ func TestServer_CrawlerShutdownAttemptedAfterHTTPTimeout(t *testing.T) {
 	inFlightStarted := make(chan struct{})
 
 	srv, svc, tempDir := setupTestServer(t, func(c *ServerConfig) {
-		c.HTTPDrainTimeout = 50 * time.Millisecond  // Short HTTP drain budget
-		c.CrawlerShutdownTimeout = 5 * time.Second  // Dedicated crawler shutdown budget
+		c.HTTPDrainTimeout = 50 * time.Millisecond // Short HTTP drain budget
+		c.CrawlerShutdownTimeout = 5 * time.Second // Dedicated crawler shutdown budget
 		c.HandlerWrapper = func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/slow" {
@@ -704,5 +704,145 @@ func TestServer_ShutdownWhenNoCrawlActive(t *testing.T) {
 	cpPath := filepath.Join(tempDir, "checkpoints", state.CheckpointFileName)
 	if _, err := os.Stat(cpPath); err == nil {
 		t.Errorf("expected no checkpoint file to be created when idle")
+	}
+}
+
+// 19. Static file serving and route precedence verification
+func TestServer_StaticFileServingAndPrecedence(t *testing.T) {
+	srv, _, _ := setupTestServer(t)
+
+	if err := srv.Start(); err != nil {
+		t.Fatalf("failed starting server: %v", err)
+	}
+	defer func() { _ = srv.Shutdown(context.Background()) }()
+
+	baseURL := "http://" + srv.Addr()
+	client := &http.Client{Timeout: 3 * time.Second}
+
+	// 1. Root / serves index.html with text/html Content-Type
+	respRoot, err := client.Get(baseURL + "/")
+	if err != nil {
+		t.Fatalf("failed GET /: %v", err)
+	}
+	defer respRoot.Body.Close()
+
+	if respRoot.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 OK for GET /, got %d", respRoot.StatusCode)
+	}
+	ctRoot := respRoot.Header.Get("Content-Type")
+	if !strings.Contains(ctRoot, "text/html") {
+		t.Errorf("expected text/html for GET /, got %s", ctRoot)
+	}
+	bodyBytes, _ := io.ReadAll(respRoot.Body)
+	if !strings.Contains(string(bodyBytes), "CrawlSync") {
+		t.Errorf("expected index.html to contain 'CrawlSync'")
+	}
+
+	// 2. CSS asset served with text/css Content-Type
+	respCSS, err := client.Get(baseURL + "/css/styles.css")
+	if err != nil {
+		t.Fatalf("failed GET /css/styles.css: %v", err)
+	}
+	defer respCSS.Body.Close()
+
+	if respCSS.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 OK for GET /css/styles.css, got %d", respCSS.StatusCode)
+	}
+	ctCSS := respCSS.Header.Get("Content-Type")
+	if !strings.Contains(ctCSS, "text/css") {
+		t.Errorf("expected text/css for GET /css/styles.css, got %s", ctCSS)
+	}
+
+	// 3. JS asset served with text/javascript or application/javascript Content-Type
+	respJS, err := client.Get(baseURL + "/js/app.js")
+	if err != nil {
+		t.Fatalf("failed GET /js/app.js: %v", err)
+	}
+	defer respJS.Body.Close()
+
+	if respJS.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 OK for GET /js/app.js, got %d", respJS.StatusCode)
+	}
+	ctJS := respJS.Header.Get("Content-Type")
+	if !strings.Contains(ctJS, "javascript") {
+		t.Errorf("expected javascript for GET /js/app.js, got %s", ctJS)
+	}
+
+	// 4. SVG asset served with image/svg+xml Content-Type
+	respSVG, err := client.Get(baseURL + "/assets/logo.svg")
+	if err != nil {
+		t.Fatalf("failed GET /assets/logo.svg: %v", err)
+	}
+	defer respSVG.Body.Close()
+
+	if respSVG.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 OK for GET /assets/logo.svg, got %d", respSVG.StatusCode)
+	}
+	ctSVG := respSVG.Header.Get("Content-Type")
+	if !strings.Contains(ctSVG, "svg") {
+		t.Errorf("expected image/svg+xml for GET /assets/logo.svg, got %s", ctSVG)
+	}
+
+	// 5. API precedence: /api/crawl/status still returns application/json and 200 OK
+	respAPI, err := client.Get(baseURL + "/api/crawl/status")
+	if err != nil {
+		t.Fatalf("failed GET /api/crawl/status: %v", err)
+	}
+	defer respAPI.Body.Close()
+
+	if respAPI.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 OK for GET /api/crawl/status, got %d", respAPI.StatusCode)
+	}
+	ctAPI := respAPI.Header.Get("Content-Type")
+	if !strings.Contains(ctAPI, "application/json") {
+		t.Errorf("expected application/json for GET /api/crawl/status, got %s", ctAPI)
+	}
+
+	// 6. Unknown /api/* returns 404 with JSON envelope (not index.html)
+	respUnknownAPI, err := client.Get(baseURL + "/api/nonexistent_route")
+	if err != nil {
+		t.Fatalf("failed GET /api/nonexistent_route: %v", err)
+	}
+	defer respUnknownAPI.Body.Close()
+
+	if respUnknownAPI.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 for unknown API, got %d", respUnknownAPI.StatusCode)
+	}
+	ctUnknown := respUnknownAPI.Header.Get("Content-Type")
+	if !strings.Contains(ctUnknown, "application/json") {
+		t.Errorf("expected JSON content-type for unknown API route, got %s", ctUnknown)
+	}
+
+	// 7. Directory browsing prevention: /js/ returns 404
+	respDir, err := client.Get(baseURL + "/js/")
+	if err != nil {
+		t.Fatalf("failed GET /js/: %v", err)
+	}
+	defer respDir.Body.Close()
+
+	if respDir.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 for directory index /js/, got %d", respDir.StatusCode)
+	}
+
+	// 8. Non-existent file returns 404
+	respNotFound, err := client.Get(baseURL + "/missing_file_xyz.html")
+	if err != nil {
+		t.Fatalf("failed GET missing file: %v", err)
+	}
+	defer respNotFound.Body.Close()
+
+	if respNotFound.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 for missing file, got %d", respNotFound.StatusCode)
+	}
+
+	// 9. POST to root returns 405 Method Not Allowed
+	respPostRoot, err := client.Post(baseURL+"/", "text/plain", strings.NewReader("hello"))
+	if err != nil {
+		t.Fatalf("failed POST /: %v", err)
+	}
+	defer respPostRoot.Body.Close()
+
+	if respPostRoot.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("expected 405 Method Not Allowed for POST /, got %d", respPostRoot.StatusCode)
 	}
 }

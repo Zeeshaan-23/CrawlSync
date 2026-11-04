@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -35,6 +36,8 @@ type ServerConfig struct {
 	EphemeralPort          bool // If true, allows binding to port 0 (OS allocates an available local port for testing)
 	Service                *CrawlerService
 	CORSOrigins            []string
+	StaticFS               fs.FS         // Optional custom static filesystem
+	StaticDir              string        // Optional on-disk directory for dashboard assets
 	ShutdownTimeout        time.Duration // Total default shutdown timeout
 	HTTPDrainTimeout       time.Duration // Dedicated timeout for draining HTTP connections
 	CrawlerShutdownTimeout time.Duration // Dedicated timeout for crawler persistence and checkpointing
@@ -134,6 +137,8 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	handler := NewHandler(HandlerConfig{
 		Service:     cfg.Service,
 		CORSOrigins: cfg.CORSOrigins,
+		StaticFS:    cfg.StaticFS,
+		StaticDir:   cfg.StaticDir,
 	})
 	if cfg.HandlerWrapper != nil {
 		handler = cfg.HandlerWrapper(handler)
@@ -233,12 +238,12 @@ func (s *Server) Start() error {
 // Shutdown initiates graceful termination of the HTTP server and crawler service.
 //
 // DETERMINISTIC TWO-PHASE SHUTDOWN SEQUENCE:
-// 1. Phase 1 (HTTP Draining): Closes listener, disables keep-alives, and drains active in-flight
-//    HTTP request handlers within a dedicated HTTP drain window.
-// 2. Phase 2 (Crawler Engine & State Persistence): Regardless of whether Phase 1 succeeded or
-//    timed out, the active Crawler is guaranteed its own bounded window to signal workers,
-//    drain the results channel, commit the "shutdown" checkpoint, and cleanly stop.
-// 3. Combines and returns any shutdown errors or timeout notices.
+//  1. Phase 1 (HTTP Draining): Closes listener, disables keep-alives, and drains active in-flight
+//     HTTP request handlers within a dedicated HTTP drain window.
+//  2. Phase 2 (Crawler Engine & State Persistence): Regardless of whether Phase 1 succeeded or
+//     timed out, the active Crawler is guaranteed its own bounded window to signal workers,
+//     drain the results channel, commit the "shutdown" checkpoint, and cleanly stop.
+//  3. Combines and returns any shutdown errors or timeout notices.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
 	if !s.running {

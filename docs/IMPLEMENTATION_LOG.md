@@ -438,3 +438,33 @@
   - `go test -count=1 -race ./internal/server/...`: ALL PASSED (0 data races)
   - `go test -count=1 -race ./...`: ALL PASSED across all packages (155 tests)
   - CLI binary build: `go build -o crawlsync.exe ./cmd/crawlsync` succeeded; verified `--help`, CLI mode, and `--serve` mode over live HTTP.
+
+---
+
+## Phase 8: Dashboard UI + Live Monitoring + Runtime Controls
+
+- **Date:** 2026-11-04
+- **Status:** Verified (All 156 unit & race tests passed, 14/14 E2E test cases passed, 0 `go vet` warnings)
+- **Files Created/Modified:**
+  - `web/fs.go`: Embedded filesystem definition packaging static frontend assets (`index.html`, `css/*`, `js/*`, `assets/*`) into Go binary via `embed.FS`.
+  - `web/index.html`: Responsive developer dashboard layout (dark theme) with sidebar, control bar, stat cards, progress monitor, doughnut chart canvas, worker pool grid, URL table, Start Crawl modal, Settings drawer, and toast notifications.
+  - `web/css/styles.css`: Dark UI system with semantic accents, responsive grid, and custom scrollbars.
+  - `web/js/api.js`: Unified, dependency-free API client handling all 10 endpoints, timeout abortion, standard JSON envelopes, and connection state.
+  - `web/js/components.js`: XSS-safe DOM formatters, status badges (`renderStateBadge`, `renderURLStatusBadge`, `renderHTTPCodeBadge`), worker cards, table rows, and toast alerts.
+  - `web/js/dashboard.js`: Telemetry coordinator with adaptive polling (1s RUNNING, 2s PAUSED, 500ms STOPPING, 4s IDLE), Chart.js doughnut updates, control button matrix sync, and URL table management.
+  - `web/js/app.js`: Event listeners for Start/Pause/Resume/Stop/Checkpoint triggers, modal workflows, search/filtering, and pagination.
+  - `web/assets/logo.svg`: Crawler concurrency logo.
+  - `internal/server/handlers.go`: Added `createStaticHandler`, `postOnlyAPIRoutes`, path traversal prevention, directory listing 404, and JSON 404 for unknown `/api/*` paths.
+  - `internal/server/middleware.go`: Scoped `jsonHeaderMiddleware` exclusively to `/api/` paths, preserving standard MIME types for frontend assets.
+  - `internal/server/server.go`: Added `StaticFS` and `StaticDir` fields to `ServerConfig` and routed to handler setup.
+  - `internal/server/server_test.go`: Added `TestServer_StaticFileServingAndPrecedence` testing root serving, assets, API route precedence, and 405 Method Not Allowed.
+  - `cmd/crawlsync/main.go`: Updated server startup banner displaying Dashboard URL.
+  - `docs/FRONTEND_API_CONTRACT.md`: Full API contract documentation for frontend development.
+  - `docs/PHASE_8_PROGRESS.md`: Detailed stage logs for Stage 8.1 and Stage 8.2.
+
+- **Verification Output:**
+  - `go vet ./...`: PASSED (0 warnings)
+  - `go test -count=1 -race ./...`: ALL PASSED across all packages (156 tests, 0 data races)
+  - `node -c web/js/*.js`: PASSED (0 syntax errors)
+  - `test_dashboard_e2e.mjs`: ALL 14 E2E SCENARIOS PASSED (static serving, API precedence, crawl start, worker monitor, live telemetry, doughnut chart data, pause/resume, manual checkpointing, graceful stop, and URL explorer pagination/sorting/filtering).
+

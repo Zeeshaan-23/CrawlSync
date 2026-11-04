@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"runtime/debug"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -44,7 +45,9 @@ func applyMiddleware(next http.Handler, cfg HandlerConfig) http.Handler {
 // jsonHeaderMiddleware ensures Content-Type is always application/json for API responses.
 func jsonHeaderMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -106,4 +109,3 @@ func corsMiddleware(next http.Handler, allowedOrigins []string) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
-

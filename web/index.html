@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="CrawlSync Developer Monitoring Console - Multithreaded Web Crawler with Checkpoint & Resume">
+  <title>CrawlSync | Infrastructure Monitoring Console</title>
+  
+  <!-- Favicon -->
+  <link rel="icon" type="image/svg+xml" href="assets/logo.svg">
+  
+  <!-- Inter & JetBrains Mono Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  
+  <!-- Chart.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+  <!-- Core Stylesheet -->
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+  <div class="app-container">
+    
+    <!-- ======================================================================
+         Sidebar Navigation & Branding
+         ====================================================================== -->
+    <aside class="app-sidebar" aria-label="Main Navigation">
+      <div class="sidebar-brand">
+        <img src="assets/logo.svg" alt="CrawlSync Logo" class="brand-logo">
+        <div class="brand-text">
+          <span class="brand-title">CrawlSync</span>
+          <span class="brand-badge">Academic Console</span>
+        </div>
+      </div>
+
+      <nav class="sidebar-nav">
+        <a href="#section-overview" class="sidebar-nav-item active" data-target="section-overview">
+          <span class="nav-icon">&#9638;</span>
+          <span>Overview</span>
+        </a>
+        <a href="#section-workers" class="sidebar-nav-item" data-target="section-workers">
+          <span class="nav-icon">&#9881;</span>
+          <span>Worker Monitor</span>
+        </a>
+        <a href="#section-urls" class="sidebar-nav-item" data-target="section-urls">
+          <span class="nav-icon">&#128279;</span>
+          <span>URL Explorer</span>
+        </a>
+        <a href="#settings" class="sidebar-nav-item" id="btn-open-settings">
+          <span class="nav-icon">&#9881;</span>
+          <span>API Settings</span>
+        </a>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="connection-indicator-wrapper">
+          <span class="conn-indicator conn-offline" id="connection-status-badge"></span>
+          <span id="connection-status-text">Connecting...</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ======================================================================
+         Main Viewport & Header
+         ====================================================================== -->
+    <main class="app-main">
+      
+      <!-- Top Header Bar -->
+      <header class="app-header">
+        <div class="header-left">
+          <div class="header-title-group">
+            <h1 class="header-page-title">Monitoring Console</h1>
+            <div id="header-state-badge">
+              <span class="state-badge badge-idle">
+                <span class="badge-dot"></span>
+                <span class="badge-text">IDLE</span>
+              </span>
+            </div>
+          </div>
+          
+          <div class="header-meta">
+            <div class="meta-item">
+              <span class="meta-label">Session:</span>
+              <span class="meta-value" id="header-session-id">No Active Session</span>
+            </div>
+            <div class="meta-item">
+              <span class="meta-label">Target:</span>
+              <span class="meta-value" id="header-seed-url">--</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="header-right">
+          <div class="meta-item">
+            <span class="meta-label">Uptime:</span>
+            <span class="meta-value" id="header-uptime">0 ms</span>
+          </div>
+          <div class="meta-item">
+            <span class="meta-label">Updated:</span>
+            <span class="meta-value" id="header-last-updated">--:--:--</span>
+          </div>
+          <button class="btn btn-secondary btn-icon-only" id="btn-refresh-dashboard" title="Refresh Live Data" aria-label="Refresh Data">
+            <span>&#8635;</span>
+          </button>
+        </div>
+      </header>
+
+      <!-- Scrollable Dashboard Body -->
+      <div class="dashboard-viewport">
+        
+        <!-- ==================================================================
+             Section 1: Crawler Action Controls Bar
+             ================================================================== -->
+        <section class="controls-bar" aria-label="Crawler Controls">
+          <div class="controls-left">
+            <button class="btn btn-primary" id="btn-control-start">
+              <span>&#9654;</span>
+              <span>Start Crawl</span>
+            </button>
+            <button class="btn btn-warning" id="btn-control-pause" disabled>
+              <span>&#10074;&#10074;</span>
+              <span>Pause</span>
+            </button>
+            <button class="btn btn-success" id="btn-control-resume" disabled>
+              <span>&#9658;</span>
+              <span>Resume</span>
+            </button>
+            <button class="btn btn-danger" id="btn-control-stop" disabled>
+              <span>&#9632;</span>
+              <span>Stop</span>
+            </button>
+          </div>
+
+          <div class="controls-right">
+            <button class="btn btn-secondary" id="btn-control-checkpoint" disabled>
+              <span>&#128190;</span>
+              <span>Save Checkpoint</span>
+            </button>
+          </div>
+        </section>
+
+        <!-- ==================================================================
+             Section 2: High-Level Stat Cards Overview
+             ================================================================== -->
+        <section id="section-overview" aria-label="Telemetry Overview">
+          <div class="stats-grid">
+            
+            <!-- Discovered URLs -->
+            <div class="stat-card stat-card-discovered">
+              <div class="stat-card-header">
+                <span class="stat-label">Discovered</span>
+                <span class="stat-icon">&#127760;</span>
+              </div>
+              <div class="stat-value" id="stat-total-discovered">0</div>
+              <div class="stat-footer">Total unique URLs registered</div>
+            </div>
+
+            <!-- Completed URLs -->
+            <div class="stat-card stat-card-completed">
+              <div class="stat-card-header">
+                <span class="stat-label">Completed</span>
+                <span class="stat-icon">&#10003;</span>
+              </div>
+              <div class="stat-value" id="stat-completed-count">0</div>
+              <div class="stat-footer">
+                <span id="stat-completed-pct">0%</span>
+                <span>persisted to disk</span>
+              </div>
+            </div>
+
+            <!-- Pending URLs -->
+            <div class="stat-card stat-card-pending">
+              <div class="stat-card-header">
+                <span class="stat-label">Pending</span>
+                <span class="stat-icon">&#8987;</span>
+              </div>
+              <div class="stat-value" id="stat-pending-count">0</div>
+              <div class="stat-footer">Queued for worker dispatch</div>
+            </div>
+
+            <!-- Failed URLs -->
+            <div class="stat-card stat-card-failed">
+              <div class="stat-card-header">
+                <span class="stat-label">Failed</span>
+                <span class="stat-icon">&#9888;</span>
+              </div>
+              <div class="stat-value" id="stat-failed-count">0</div>
+              <div class="stat-footer">HTTP 4xx/5xx or timeout</div>
+            </div>
+
+            <!-- In Progress / Currently Crawling -->
+            <div class="stat-card stat-card-crawling">
+              <div class="stat-card-header">
+                <span class="stat-label">In-Flight</span>
+                <span class="stat-icon">&#9881;</span>
+              </div>
+              <div class="stat-value" id="stat-crawling-count">0</div>
+              <div class="stat-footer">Active worker downloads</div>
+            </div>
+
+          </div>
+        </section>
+
+        <!-- Secondary Metrics Bar -->
+        <div class="secondary-metrics-bar">
+          <div class="metric-item">
+            <span class="metric-title">Throughput:</span>
+            <span class="metric-data" id="stat-crawl-speed">0.0 /s</span>
+          </div>
+          <div class="metric-item">
+            <span class="metric-title">Active Workers:</span>
+            <span class="metric-data" id="stat-active-workers">0 / 0</span>
+          </div>
+          <div class="metric-item">
+            <span class="metric-title">HTML Storage:</span>
+            <span class="metric-data">data/pages/</span>
+          </div>
+          <div class="metric-item">
+            <span class="metric-title">Checkpointing:</span>
+            <span class="metric-data">data/checkpoints/</span>
+          </div>
+        </div>
+
+        <!-- ==================================================================
+             Section 3: Progress & Distribution Monitoring
+             ================================================================== -->
+        <section class="monitoring-grid">
+          
+          <!-- URL Status Distribution Doughnut Chart -->
+          <div class="dashboard-panel">
+            <div class="panel-header">
+              <h2 class="panel-title">
+                <span>&#128202;</span>
+                <span>URL Status Distribution</span>
+              </h2>
+            </div>
+            <div class="chart-container">
+              <canvas id="chart-status-distribution" aria-label="URL Status Distribution Chart"></canvas>
+            </div>
+          </div>
+
+          <!-- Crawl Progress & Active Session Parameters -->
+          <div class="dashboard-panel">
+            <div class="panel-header">
+              <h2 class="panel-title">
+                <span>&#9201;</span>
+                <span>Session Parameters & Progress</span>
+              </h2>
+            </div>
+
+            <div class="progress-section">
+              <div class="progress-header">
+                <span>Progress:</span>
+                <span id="crawl-progress-text">Ready to crawl</span>
+              </div>
+              <div class="progress-bar-track">
+                <div class="progress-bar-fill" id="crawl-progress-fill"></div>
+              </div>
+            </div>
+
+            <div class="session-details-list">
+              <div class="detail-row">
+                <span class="detail-label">Start URL:</span>
+                <span class="detail-val" id="detail-start-url">--</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">Page Ceiling:</span>
+                <span class="detail-val" id="detail-max-pages">--</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">Max Link Depth:</span>
+                <span class="detail-val" id="detail-max-depth">--</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">Worker Pool:</span>
+                <span class="detail-val" id="detail-worker-count">--</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">Domain Scope:</span>
+                <span class="detail-val" id="detail-domain-policy">--</span>
+              </div>
+            </div>
+          </div>
+
+        </section>
+
+        <!-- ==================================================================
+             Section 4: Worker Pool Monitor
+             ================================================================== -->
+        <section id="section-workers" class="dashboard-panel" aria-label="Worker Pool Monitor">
+          <div class="panel-header">
+            <h2 class="panel-title">
+              <span>&#9881;</span>
+              <span>Worker Pool Monitor (Goroutines)</span>
+            </h2>
+            <span class="badge-idle state-badge" id="worker-count-badge">0 Workers</span>
+          </div>
+
+          <div class="worker-grid" id="worker-cards-grid">
+            <div class="worker-grid-empty">
+              <div class="empty-icon">&#9881;</div>
+              <div class="empty-text">No active worker pool. Start a crawl session to spawn worker goroutines.</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ==================================================================
+             Section 5: URL Explorer Table with Filtering & Pagination
+             ================================================================== -->
+        <section id="section-urls" class="dashboard-panel" aria-label="URL Explorer">
+          <div class="panel-header">
+            <h2 class="panel-title">
+              <span>&#128279;</span>
+              <span>Discovered URL Explorer</span>
+            </h2>
+          </div>
+
+          <!-- Filter & Search Bar -->
+          <div class="filter-bar">
+            <select class="form-control select-control" id="filter-url-status" aria-label="Filter by Status">
+              <option value="">All Statuses</option>
+              <option value="completed">Completed</option>
+              <option value="in_progress">Crawling (In-Progress)</option>
+              <option value="pending">Pending</option>
+              <option value="failed">Failed</option>
+            </select>
+
+            <input type="number" class="form-control" id="filter-url-depth" placeholder="Filter by Depth..." min="0" style="width: 140px;" aria-label="Filter by Depth">
+
+            <select class="form-control select-control" id="filter-url-sort" aria-label="Sort URLs">
+              <option value="seq_asc">Sequence (Ascending)</option>
+              <option value="seq_desc">Sequence (Descending)</option>
+              <option value="depth_asc">Depth (Ascending)</option>
+              <option value="depth_desc">Depth (Descending)</option>
+              <option value="time_desc">Discovery Time (Descending)</option>
+            </select>
+
+            <select class="form-control select-control" id="select-page-size" style="margin-left: auto;" aria-label="Page Size">
+              <option value="10">10 per page</option>
+              <option value="20" selected>20 per page</option>
+              <option value="50">50 per page</option>
+              <option value="100">100 per page</option>
+            </select>
+          </div>
+
+          <!-- Data Table -->
+          <div class="table-responsive">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th style="width: 50px;">#</th>
+                  <th>Discovered URL</th>
+                  <th style="width: 110px;">Status</th>
+                  <th style="width: 70px;">Depth</th>
+                  <th style="width: 70px;">Code</th>
+                  <th style="width: 90px;">Size</th>
+                  <th style="width: 90px;">Duration</th>
+                  <th style="width: 140px;">Disk Path</th>
+                </tr>
+              </thead>
+              <tbody id="url-table-body">
+                <tr>
+                  <td colspan="8" class="table-empty-cell">
+                    <div class="empty-state">
+                      <div class="empty-state-icon">&#128269;</div>
+                      <h3 class="empty-state-title">No Discovered URLs</h3>
+                      <p class="empty-state-desc">Start a crawl session to begin discovering and downloading URLs.</p>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Pagination Bar -->
+          <div class="pagination-bar">
+            <span id="url-pagination-info">Showing 0 of 0</span>
+            <div class="pagination-controls">
+              <button class="btn btn-secondary btn-icon-only" id="btn-page-prev" disabled title="Previous Page">
+                <span>&larr;</span>
+              </button>
+              <button class="btn btn-secondary btn-icon-only" id="btn-page-next" disabled title="Next Page">
+                <span>&rarr;</span>
+              </button>
+            </div>
+          </div>
+        </section>
+
+      </div>
+    </main>
+
+  </div>
+
+  <!-- ======================================================================
+       Start Crawl Configuration Modal
+       ====================================================================== -->
+  <div class="modal-overlay" id="modal-start-crawl" role="dialog" aria-modal="true" aria-labelledby="modal-start-title">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 class="modal-title" id="modal-start-title">Initiate Crawl Session</h3>
+        <button class="modal-close-btn" id="btn-close-start-modal" aria-label="Close dialog">&times;</button>
+      </div>
+
+      <form id="form-start-crawl">
+        <div class="modal-body">
+          <div class="form-group">
+            <label class="form-label" for="input-crawl-url">Seed URL (Target Start)</label>
+            <input type="url" class="form-control" id="input-crawl-url" placeholder="https://example.com" required>
+            <span class="form-hint">Must be a valid HTTP or HTTPS URL</span>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label" for="input-crawl-workers">Worker Goroutines (1 - 20)</label>
+              <input type="number" class="form-control" id="input-crawl-workers" min="1" max="20" value="5" required>
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="input-crawl-max-pages">Page Download Ceiling</label>
+              <input type="number" class="form-control" id="input-crawl-max-pages" min="1" value="10" required>
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label" for="input-crawl-max-depth">Maximum Depth (&ge; 0)</label>
+              <input type="number" class="form-control" id="input-crawl-max-depth" min="0" value="2" required>
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="input-crawl-timeout">Fetch Timeout (Seconds)</label>
+              <input type="number" class="form-control" id="input-crawl-timeout" min="1" value="10" required>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-checkbox-label">
+              <input type="checkbox" class="form-checkbox" id="input-crawl-same-domain" checked>
+              <span>Restrict crawl strictly to same domain</span>
+            </label>
+          </div>
+
+          <div class="form-row" style="margin-top: 6px; padding-top: 10px; border-top: 1px solid var(--border-subtle);">
+            <div class="form-group">
+              <label class="form-checkbox-label">
+                <input type="checkbox" class="form-checkbox" id="input-crawl-resume">
+                <span>Resume from checkpoint</span>
+              </label>
+            </div>
+            <div class="form-group">
+              <label class="form-checkbox-label">
+                <input type="checkbox" class="form-checkbox" id="input-crawl-retry-failed">
+                <span>Retry failed URLs on resume</span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" id="btn-cancel-start-modal">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="btn-submit-start-crawl">Start Crawl Session</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ======================================================================
+       API Settings Configuration Modal
+       ====================================================================== -->
+  <div class="modal-overlay" id="modal-settings" role="dialog" aria-modal="true" aria-labelledby="modal-settings-title">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 class="modal-title" id="modal-settings-title">Backend API Settings</h3>
+        <button class="modal-close-btn" id="btn-close-settings-modal" aria-label="Close dialog">&times;</button>
+      </div>
+
+      <form id="form-settings">
+        <div class="modal-body">
+          <div class="form-group">
+            <label class="form-label" for="setting-api-base">CrawlSync API Base URL</label>
+            <input type="text" class="form-control" id="setting-api-base" placeholder="http://127.0.0.1:8080" required>
+            <span class="form-hint">Points to the Go HTTP server daemon. Leave blank if served from the same host.</span>
+          </div>
+
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 8px;">
+            <button type="button" class="btn btn-secondary" id="btn-test-connection">Test Connection</button>
+            <span id="test-connection-result"></span>
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" id="btn-cancel-settings-modal">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save Settings</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Toast Container -->
+  <div id="toast-container" class="toast-container" aria-live="polite"></div>
+
+  <!-- ======================================================================
+       Modular Scripts Execution Pipeline
+       ====================================================================== -->
+  <script src="js/api.js"></script>
+  <script src="js/components.js"></script>
+  <script src="js/dashboard.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
+

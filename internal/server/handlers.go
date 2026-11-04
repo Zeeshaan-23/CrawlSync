@@ -5,16 +5,23 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
+	"os"
+	"path"
 	"strings"
 	"time"
+
+	"crawlsync/web"
 )
 
 // HandlerConfig configures the HTTP router and API endpoints.
 type HandlerConfig struct {
 	Service     *CrawlerService
 	CORSOrigins []string
+	StaticFS    fs.FS  // Optional custom filesystem for dashboard assets (defaults to embedded web.Files())
+	StaticDir   string // Optional on-disk directory for live frontend development
 }
 
 // apiHandler encapsulates endpoint handlers bound to the CrawlerService.
@@ -22,12 +29,13 @@ type apiHandler struct {
 	service *CrawlerService
 }
 
-// NewHandler creates and registers the HTTP ServeMux with all routes and middleware.
+// NewHandler creates and registers the HTTP ServeMux with all routes, static file serving, and middleware.
 func NewHandler(cfg HandlerConfig) http.Handler {
 	mux := http.NewServeMux()
 	h := &apiHandler{service: cfg.Service}
 
-	// Register routes using Go 1.22+ method-aware routing patterns
+	// 1. Register API routes using Go 1.22+ method-aware routing patterns.
+	// In Go 1.22 ServeMux, these exact /api/... routes take strict precedence over the root "GET /".
 	mux.HandleFunc("POST /api/crawl/start", h.handleCrawlStart)
 	mux.HandleFunc("GET /api/crawl/status", h.handleCrawlStatus)
 	mux.HandleFunc("GET /api/crawl/stats", h.handleCrawlStats)
@@ -39,7 +47,94 @@ func NewHandler(cfg HandlerConfig) http.Handler {
 	mux.HandleFunc("GET /api/urls", h.handleURLList)
 	mux.HandleFunc("GET /api/urls/{id}", h.handleURLDetail)
 
+	// 2. Register static dashboard handler at "GET /"
+	staticHandler := createStaticHandler(cfg)
+	mux.Handle("GET /", staticHandler)
+
 	return applyMiddleware(mux, cfg)
+}
+
+var postOnlyAPIRoutes = map[string]bool{
+	"/api/crawl/start":      true,
+	"/api/crawl/pause":      true,
+	"/api/crawl/resume":     true,
+	"/api/crawl/stop":       true,
+	"/api/crawl/checkpoint": true,
+}
+
+// createStaticHandler builds a safe file server serving the CrawlSync dashboard.
+// It prevents directory traversal, suppresses directory browsing, and returns JSON 404 for unknown /api/* requests.
+func createStaticHandler(cfg HandlerConfig) http.Handler {
+	var targetFS fs.FS
+
+	// 1. If explicit StaticDir is configured and exists on disk, use it
+	if cfg.StaticDir != "" {
+		if fi, err := os.Stat(cfg.StaticDir); err == nil && fi.IsDir() {
+			targetFS = os.DirFS(cfg.StaticDir)
+		}
+	}
+
+	// 2. If running from repository root where "./web/index.html" exists, use local web dir for development
+	if targetFS == nil {
+		if fi, err := os.Stat("web/index.html"); err == nil && !fi.IsDir() {
+			targetFS = os.DirFS("web")
+		}
+	}
+
+	// 3. If explicit StaticFS is provided
+	if targetFS == nil && cfg.StaticFS != nil {
+		targetFS = cfg.StaticFS
+	}
+
+	// 4. Default to embedded web.Files()
+	if targetFS == nil {
+		targetFS = web.Files()
+	}
+
+	fileServer := http.FileServer(http.FS(targetFS))
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cleanPath := path.Clean(r.URL.Path)
+
+		// 1. If an exact POST-only API route was hit via GET, return 405 Method Not Allowed
+		if postOnlyAPIRoutes[cleanPath] {
+			w.Header().Set("Allow", "POST")
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		// 2. Prevent path traversal attacks
+		if strings.Contains(cleanPath, "..") || strings.Contains(r.URL.RawQuery, "..") {
+			writeError(w, http.StatusBadRequest, "INVALID_PATH", "Invalid path traversal sequence")
+			return
+		}
+
+		// 3. Unknown /api/* requests falling back to root handler return structured JSON 404
+		if strings.HasPrefix(cleanPath, "/api/") {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "API endpoint not found")
+			return
+		}
+
+		// 4. Disable directory browsing: if path ends with "/" and is not root "/", return 404
+		if cleanPath != "/" && strings.HasSuffix(r.URL.Path, "/") {
+			http.NotFound(w, r)
+			return
+		}
+
+		// 5. If a directory without trailing slash is requested (e.g. /css or /js), deny directory listing
+		trimmed := strings.TrimPrefix(cleanPath, "/")
+		if trimmed != "" {
+			if f, err := targetFS.Open(trimmed); err == nil {
+				defer f.Close()
+				if fi, err := f.Stat(); err == nil && fi.IsDir() {
+					http.NotFound(w, r)
+					return
+				}
+			}
+		}
+
+		fileServer.ServeHTTP(w, r)
+	})
 }
 
 // Helper to write JSON responses
