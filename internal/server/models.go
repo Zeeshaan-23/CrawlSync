@@ -37,6 +37,7 @@ type StartCrawlRequestDTO struct {
 	SameDomain     *bool  `json:"same_domain,omitempty"`
 	Resume         *bool  `json:"resume,omitempty"`
 	RetryFailed    *bool  `json:"retry_failed,omitempty"`
+	PauseOnStart   *bool  `json:"pause_on_start,omitempty"`
 }
 
 // API Response Data DTOs
@@ -132,4 +133,3 @@ type WorkerListResponseDTO struct {
 	WorkerCount int                     `json:"worker_count"`
 	Workers     []WorkerInfoResponseDTO `json:"workers"`
 }
-

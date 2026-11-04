@@ -185,3 +185,36 @@ go test -count=1 -race ./...
 go build -o crawlsync.exe ./cmd/crawlsync
 ```
 
+---
+
+## 7. Local Test Server (Concurrency & Recovery Testing)
+
+CrawlSync includes a multithreaded Python HTTP test server designed for testing concurrency, runtime pause/resume, atomic checkpointing, and crash recovery with controlled response delays.
+
+### Starting the Test Server
+```bash
+# Start on default port 9000 with a 2.0-second delay per request
+python test_server.py
+
+# Or customize host, port, and response delay
+python test_server.py --host 127.0.0.1 --port 9000 --delay 2.0
+```
+
+The test server hosts 5 interconnected HTML pages (`/index.html`, `/page1.html` through `/page4.html`) and logs every incoming request with timestamps, worker thread IDs, and response durations.
+
+### Testing CrawlSync Against the Test Server
+
+**1. CLI Crawler Mode:**
+```bash
+# Note: --allow-local is required to crawl localhost / 127.0.0.1
+go run ./cmd/crawlsync --url http://127.0.0.1:9000/ --allow-local --workers 3 --max-pages 10
+```
+
+**2. Web Dashboard Mode:**
+```bash
+# Start CrawlSync in server mode with local crawling permitted
+go run ./cmd/crawlsync --serve --allow-local
+```
+Open `http://127.0.0.1:8080/` in your browser, enter `http://127.0.0.1:9000/` as the seed URL, and initiate the session. Because each page response has a 2-second delay, you have ample time to test runtime **Pause**, **Resume**, **Save Checkpoint**, and **Stop** controls from the dashboard interface.
+
+

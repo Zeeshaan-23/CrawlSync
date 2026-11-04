@@ -302,6 +302,9 @@ func (h *apiHandler) handleCrawlStart(w http.ResponseWriter, r *http.Request) {
 	if dto.RetryFailed != nil {
 		req.RetryFailed = *dto.RetryFailed
 	}
+	if dto.PauseOnStart != nil {
+		req.PauseOnStart = *dto.PauseOnStart
+	}
 
 	sessionInfo, err := h.service.StartCrawl(req)
 	if err != nil {

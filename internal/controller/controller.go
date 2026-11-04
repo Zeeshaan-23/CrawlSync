@@ -63,7 +63,7 @@ type Config struct {
 	SameDomainOnly     bool
 	AllowLocal         bool
 	SessionID          string        // Preserves session ID across recovery
-	CumulativeElapsed time.Duration // Cumulative elapsed runtime from previous sessions
+	CumulativeElapsed  time.Duration // Cumulative elapsed runtime from previous sessions
 	InitialSequence    int64         // Checkpoint sequence to resume monotonically from
 	IsResumed          bool          // Indicates this is a resumed crawl session
 }
@@ -245,7 +245,10 @@ func (c *Controller) Run(parentCtx context.Context) error {
 	}
 
 	// 2. Setup communication channels (Producer-Consumer Buffer)
-	jobsChan := make(chan Job, c.config.WorkerCount*2)
+	// jobsChan is unbuffered so jobs are dispatched directly to ready workers (rendezvous).
+	// This ensures that when the controller pauses, no pre-buffered jobs linger in the channel,
+	// strictly guaranteeing that no new HTTP requests are dispatched while paused.
+	jobsChan := make(chan Job)
 	resultsChan := make(chan CrawlResult, c.config.WorkerCount*2)
 
 	// 3. Start worker pool

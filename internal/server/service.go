@@ -61,8 +61,9 @@ type StartCrawlRequest struct {
 	CheckpointInterval time.Duration `json:"checkpoint_interval,omitempty"`
 
 	// Resumption options
-	Resume      bool `json:"resume,omitempty"`
-	RetryFailed bool `json:"retry_failed,omitempty"`
+	Resume       bool `json:"resume,omitempty"`
+	RetryFailed  bool `json:"retry_failed,omitempty"`
+	PauseOnStart bool `json:"pause_on_start,omitempty"`
 }
 
 // CrawlStatusInfo encapsulates point-in-time status metadata for the active or most recent session.
@@ -141,6 +142,18 @@ func (s *CrawlerService) Options() ServiceOptions {
 // Rejects concurrent starts with ErrCrawlAlreadyRunning or ErrCrawlStopping.
 // Only transitions to StateRunning if the previous session has fully terminated.
 func (s *CrawlerService) StartCrawl(req StartCrawlRequest) (*CrawlSessionInfo, error) {
+	return s.startSessionInternal(req, req.PauseOnStart)
+}
+
+// RestoreSession restores a crawl session from a checkpoint into the service.
+// When pauseOnStart is true, the controller is initialized in StatePaused, allowing
+// the operator/dashboard to inspect restored URLs before issuing Resume.
+func (s *CrawlerService) RestoreSession(req StartCrawlRequest, pauseOnStart bool) (*CrawlSessionInfo, error) {
+	req.Resume = true
+	return s.startSessionInternal(req, pauseOnStart)
+}
+
+func (s *CrawlerService) startSessionInternal(req StartCrawlRequest, pauseOnStart bool) (*CrawlSessionInfo, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -297,11 +310,17 @@ func (s *CrawlerService) StartCrawl(req StartCrawlRequest) (*CrawlSessionInfo, e
 	}
 
 	// 5. Update service state
+	if pauseOnStart {
+		_ = ctrl.Pause()
+		s.state = StatePaused
+	} else {
+		s.state = StateRunning
+	}
+
 	s.activeController = ctrl
 	s.activeManager = mgr
 	s.activeConfig = cfg
 	s.activeSessionID = ctrl.SessionID()
-	s.state = StateRunning
 	s.lastRunError = nil
 
 	runCtx, cancel := context.WithCancel(context.Background())
@@ -313,9 +332,10 @@ func (s *CrawlerService) StartCrawl(req StartCrawlRequest) (*CrawlSessionInfo, e
 	// 6. Launch asynchronous session supervisor
 	go s.superviseSession(ctrl, runCtx, ctrl.SessionID(), doneChan)
 
+	infoState := s.state
 	info := &CrawlSessionInfo{
 		SessionID:          ctrl.SessionID(),
-		State:              StateRunning,
+		State:              infoState,
 		StartURL:           cfg.StartURL,
 		WorkerCount:        cfg.WorkerCount,
 		MaxPages:           cfg.MaxPages,
@@ -486,14 +506,14 @@ func (s *CrawlerService) GetStatus() CrawlStatusInfo {
 	defer s.mu.RUnlock()
 
 	info := CrawlStatusInfo{
-		State:        s.state,
-		SessionID:    s.activeSessionID,
-		StartURL:     s.activeConfig.StartURL,
-		WorkerCount:  s.activeConfig.WorkerCount,
-		MaxPages:     s.activeConfig.MaxPages,
-		MaxDepth:     s.activeConfig.MaxDepth,
-		IsPaused:     s.state == StatePaused,
-		IsResumed:    s.activeConfig.IsResumed,
+		State:       s.state,
+		SessionID:   s.activeSessionID,
+		StartURL:    s.activeConfig.StartURL,
+		WorkerCount: s.activeConfig.WorkerCount,
+		MaxPages:    s.activeConfig.MaxPages,
+		MaxDepth:    s.activeConfig.MaxDepth,
+		IsPaused:    s.state == StatePaused,
+		IsResumed:   s.activeConfig.IsResumed,
 	}
 
 	if s.lastRunError != nil {
@@ -599,4 +619,3 @@ func (s *CrawlerService) Shutdown(ctx context.Context) error {
 		return ctx.Err()
 	}
 }
-

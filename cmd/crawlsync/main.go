@@ -39,7 +39,8 @@ func main() {
 	})
 
 	if *serve {
-		runServerMode(*host, *port, *storageDirFlag, *checkpointDirFlag, *workers, *checkpointInterval, *allowLocal)
+		checkpointDir := resolveCheckpointDir(*checkpointDirFlag, *storageDirFlag, explicitFlags["checkpoint-dir"])
+		runServerMode(*host, *port, *storageDirFlag, checkpointDir, *workers, *checkpointInterval, *allowLocal, *resume, *retryFailed)
 		return
 	}
 
@@ -240,7 +241,7 @@ func resolveCheckpointDir(cliCheckpointDir, cliStorageDir string, explicitCheckp
 // OS CONCEPT - SERVICE DAEMONIZATION & CLEAN DECOUPLING:
 // The server operates as an HTTP service daemon without spawning any crawler
 // threads or controllers until an explicit client request is accepted.
-func runServerMode(host string, port int, storageDir, checkpointDir string, workers int, cpInterval time.Duration, allowLocal bool) {
+func runServerMode(host string, port int, storageDir, checkpointDir string, workers int, cpInterval time.Duration, allowLocal, resume, retryFailed bool) {
 	if port < 1 || port > 65535 {
 		fmt.Printf("[Server ERROR] Invalid port %d: must be between 1 and 65535\n", port)
 		os.Exit(1)
@@ -258,6 +259,22 @@ func runServerMode(host string, port int, storageDir, checkpointDir string, work
 		AllowLocal:                allowLocal,
 	})
 
+	var recoveredSession *server.CrawlSessionInfo
+	if resume {
+		fmt.Println("[Recovery] Inspecting checkpoint directory for server mode:", checkpointDir)
+		var err error
+		recoveredSession, err = svc.RestoreSession(server.StartCrawlRequest{
+			StorageDir:    storageDir,
+			CheckpointDir: checkpointDir,
+			Resume:        true,
+			RetryFailed:   retryFailed,
+		}, true) // pauseOnStart = true
+		if err != nil {
+			fmt.Printf("[Recovery ERROR] Checkpoint recovery failed: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
 	srv, err := server.NewServer(server.ServerConfig{
 		Host:    host,
 		Port:    port,
@@ -269,7 +286,11 @@ func runServerMode(host string, port int, storageDir, checkpointDir string, work
 	}
 
 	fmt.Println("==================================================")
-	fmt.Println(" CrawlSync - Phase 8 Server & Dashboard Mode")
+	if resume {
+		fmt.Println(" CrawlSync - Phase 8 Server & Recovered Dashboard")
+	} else {
+		fmt.Println(" CrawlSync - Phase 8 Server & Dashboard Mode")
+	}
 	fmt.Println("==================================================")
 	fmt.Printf("Dashboard URL:       http://%s/\n", srv.Addr())
 	fmt.Printf("Storage Directory:   %s\n", storageDir)
@@ -277,6 +298,11 @@ func runServerMode(host string, port int, storageDir, checkpointDir string, work
 	fmt.Printf("Default Workers:     %d\n", workers)
 	fmt.Printf("Checkpoint Interval: %v\n", cpInterval)
 	fmt.Printf("Allow Local IPs:     %t\n", allowLocal)
+	if recoveredSession != nil {
+		fmt.Printf("Recovered Session:   %s (State: %s)\n", recoveredSession.SessionID, recoveredSession.State)
+		fmt.Printf("Recovered Start URL: %s\n", recoveredSession.StartURL)
+		fmt.Printf("Resume Instructions: Open dashboard and click 'Resume' or POST /api/crawl/resume\n")
+	}
 	fmt.Println("--------------------------------------------------")
 	fmt.Println("Endpoints:")
 	fmt.Println("  GET  /                     - CrawlSync Dashboard UI")
