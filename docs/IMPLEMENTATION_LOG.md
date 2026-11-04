@@ -259,3 +259,67 @@
 - `go vet ./...`: PASSED (0 warnings)
 - `go test -v ./...`: ALL PASSED across all packages (31 controller tests with 33 PASS lines, 4 fetcher tests, all parser subtests, 19 state tests, all urlmanager subtests)
 - `go test -count=1 -race ./...`: ALL PASSED (0 data races detected)
+
+---
+
+## Phase 7: REST API
+
+### Stage 1: URL Manager Query Methods & Unit Tests
+- **Implementation Summary (`internal/urlmanager/manager.go`):**
+  - Added `GetBySequence(seq int64) (*URLItem, bool)`:
+    - Scans URL table under `m.mu.RLock()` to find the URL matching sequence `seq`.
+    - Returns a deep struct value copy, preserving memory isolation and preventing external mutation of internal URL map records.
+    - Rejects sequence `<= 0` immediately.
+  - Added `URLFilterOptions` struct:
+    - `Status *URLStatus`: optional status filter (`pending`, `in_progress`, `completed`, `failed`).
+    - `Depth *int`: optional discovery depth filter.
+    - `Offset int`: zero-based pagination offset.
+    - `Limit int`: page limit bounded between 1 and 100 (default 20).
+    - `SortBy string`: sort criterion (`"seq_asc"` [default], `"seq_desc"`, `"depth_asc"`, `"depth_desc"`, `"time_desc"`).
+  - Added `GetFilteredURLs(opts URLFilterOptions) (items []URLItem, total int, filtered int)`:
+    - **Bounded Lock Retention:** Holds `m.mu.RLock()` strictly long enough to filter and copy matching items into a value slice.
+    - **Lock-Free Processing:** Releases read lock before performing sorting, offset window calculation, and response slicing.
+    - Safely handles out-of-bounds offsets and partial last pages.
+- **Automated Unit Tests (`internal/urlmanager/query_test.go`):**
+  - `TestURLManager_GetBySequence`: verifies valid sequence lookup, non-existent sequence handling, non-positive sequence rejection, and data mutation isolation.
+  - `TestURLManager_GetFilteredURLs_Pagination`: verifies offset/limit windows, page 1/2/3, partial pages, beyond-filtered offsets, and default limits.
+  - `TestURLManager_GetFilteredURLs_Filtering`: verifies status filtering, depth filtering, combined filters, and empty filter result sets.
+  - `TestURLManager_GetFilteredURLs_Sorting`: verifies `seq_desc`, `depth_asc`, `depth_desc`, and `time_desc` sorting order.
+  - `TestURLManager_GetFilteredURLs_ConcurrentSafe`: verifies 8 concurrent writer goroutines and 8 concurrent reader goroutines under race detector.
+- **Verification Output:**
+  - `go vet ./internal/urlmanager/...`: PASSED (0 warnings)
+  - `go test -v ./internal/urlmanager/...`: ALL PASSED (9 top-level tests, 21 subtests)
+  - `go test -count=1 -race ./internal/urlmanager/...`: ALL PASSED (0 data races)
+
+### Stage 2: Server Core & CrawlerService
+- **Implementation Summary (`internal/server/service.go`):**
+  - **Lifecycle State Machine:**
+    - States: `IDLE`, `RUNNING`, `PAUSED`, `STOPPING`, `STOPPED`, `COMPLETED`.
+    - Enforced transitions:
+      `IDLE -> RUNNING`, `RUNNING -> PAUSED`, `PAUSED -> RUNNING`, `RUNNING -> STOPPING`, `PAUSED -> STOPPING`, `STOPPING -> STOPPED`, `RUNNING -> COMPLETED`.
+    - Start requests while `STOPPING` return `ErrCrawlStopping`.
+    - Start requests while `RUNNING` or `PAUSED` return `ErrCrawlAlreadyRunning`.
+  - **Concurrency & Deadlock Prevention Strategy:**
+    - Never holds the `CrawlerService` mutex while calling potentially blocking Controller methods (`ctrl.Stop()`, `ctrl.CreateCheckpoint()`, or `doneChan` wait).
+    - General execution pattern:
+      1. Acquire service mutex (`s.mu.Lock()`).
+      2. Validate lifecycle state.
+      3. Capture active session/controller pointers.
+      4. Set intermediate state (e.g. `StateStopping`).
+      5. Release service mutex (`s.mu.Unlock()`).
+      6. Invoke Controller method (`ctrl.Stop()` or `ctrl.CreateCheckpoint()`).
+      7. Reacquire mutex / wait on `sessionDoneChan`.
+  - **Asynchronous Execution & Generation Guard:**
+    - `StartCrawl()` starts a new `Controller` on a background goroutine and monitors completion via `superviseSession()`.
+    - Generation check: checks `s.activeSessionID == sessID` under mutex lock to ensure a terminated older session can never overwrite a newer session's state.
+  - **SSRF Operator Control:**
+    - `AllowLocal` is strictly managed via operator `ServiceOptions.AllowLocal`. Client-facing `StartCrawlRequest` cannot enable private IP crawling.
+  - **Thread-Safe Read Queries:**
+    - `GetStatus()`, `GetStats()`, `GetURLs()`, `GetURLBySequence()`, `GetWorkers()`, `GetSessionInfo()` safe for concurrent execution during crawls.
+- **Automated Unit Tests (`internal/server/service_test.go`):**
+  - 17 test functions covering: service initialization, starting new crawls, rejecting duplicate starts, natural completion, pause/resume, stop while running/paused, session restarts, rejecting start while stopping, checkpoint resumption, retry-failed recovery, manual checkpointing, read queries during crawl, concurrent queries, concurrent lifecycle operations, generation isolation, and graceful shutdown.
+- **Verification Output:**
+  - `go vet ./...`: PASSED (0 warnings)
+  - `go test -v -count=1 ./internal/server/...`: ALL PASSED (17 tests)
+  - `go test -count=1 -race ./internal/server/...`: ALL PASSED (0 data races)
+  - `go test -count=1 -race ./...`: ALL PASSED across all packages

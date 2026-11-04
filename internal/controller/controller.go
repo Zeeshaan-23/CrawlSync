@@ -567,10 +567,7 @@ func (c *Controller) doSaveCheckpoint(reason string) (*state.Checkpoint, error) 
 		StorageDir:     c.config.StorageDir,
 	}
 
-	totalElapsed := c.cumulativeElapsed
-	if !c.sessionStartTime.IsZero() {
-		totalElapsed += time.Since(c.sessionStartTime)
-	}
+	totalElapsed := c.CumulativeElapsed()
 
 	cp, err := c.checkpointManager.Save(c.sessionID, checkpointCfg, snap, totalElapsed)
 	if err != nil {

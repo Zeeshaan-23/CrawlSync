@@ -416,3 +416,119 @@ func (m *Manager) GetPendingItems() []URLItem {
 
 	return pending
 }
+
+// GetBySequence returns a copy of the URL item with the matching sequence number,
+// or false if no record exists with that sequence ID.
+//
+// OS CONCEPT - SAFE DATA ISOLATION:
+// Returns a deep copy of the URLItem struct so callers cannot mutate internal
+// state or create race conditions outside the read lock.
+func (m *Manager) GetBySequence(seq int64) (*URLItem, bool) {
+	if seq <= 0 {
+		return nil, false
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, item := range m.urls {
+		if item.Sequence == seq {
+			copied := *item
+			return &copied, true
+		}
+	}
+	return nil, false
+}
+
+// URLFilterOptions configures filtering, sorting, and pagination for URL queries.
+type URLFilterOptions struct {
+	Status *URLStatus // Optional status filter
+	Depth  *int       // Optional depth filter
+	Offset int        // Pagination offset (0-based)
+	Limit  int        // Pagination limit (max items returned)
+	SortBy string     // Sort criterion: "seq_asc" (default), "seq_desc", "depth_asc", "depth_desc", "time_desc"
+}
+
+// GetFilteredURLs retrieves a paginated and filtered list of URL items.
+//
+// OS CONCEPT - BOUNDED LOCK RETENTION & MEMORY ISOLATION:
+// The read lock is held only long enough to evaluate filtering predicates and copy matching
+// items. Sorting, pagination slicing, and response formatting are performed outside the lock,
+// preventing concurrent worker threads from stalling on lock contention.
+func (m *Manager) GetFilteredURLs(opts URLFilterOptions) (items []URLItem, total int, filtered int) {
+	// Normalize pagination bounds
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	offset := opts.Offset
+	if offset < 0 {
+		offset = 0
+	}
+
+	m.mu.RLock()
+	total = len(m.urls)
+	var matching []URLItem
+
+	for _, item := range m.urls {
+		if opts.Status != nil && item.Status != *opts.Status {
+			continue
+		}
+		if opts.Depth != nil && item.Depth != *opts.Depth {
+			continue
+		}
+		matching = append(matching, *item)
+	}
+	m.mu.RUnlock()
+
+	filtered = len(matching)
+
+	// Sort outside the read lock
+	switch opts.SortBy {
+	case "seq_desc":
+		sort.Slice(matching, func(i, j int) bool {
+			return matching[i].Sequence > matching[j].Sequence
+		})
+	case "depth_asc":
+		sort.Slice(matching, func(i, j int) bool {
+			if matching[i].Depth == matching[j].Depth {
+				return matching[i].Sequence < matching[j].Sequence
+			}
+			return matching[i].Depth < matching[j].Depth
+		})
+	case "depth_desc":
+		sort.Slice(matching, func(i, j int) bool {
+			if matching[i].Depth == matching[j].Depth {
+				return matching[i].Sequence < matching[j].Sequence
+			}
+			return matching[i].Depth > matching[j].Depth
+		})
+	case "time_desc":
+		sort.Slice(matching, func(i, j int) bool {
+			return matching[i].UpdatedAt.After(matching[j].UpdatedAt)
+		})
+	default: // "seq_asc"
+		sort.Slice(matching, func(i, j int) bool {
+			return matching[i].Sequence < matching[j].Sequence
+		})
+	}
+
+	// Apply pagination window safely
+	if offset >= filtered {
+		return []URLItem{}, total, filtered
+	}
+
+	end := offset + limit
+	if end > filtered {
+		end = filtered
+	}
+
+	paginated := matching[offset:end]
+	result := make([]URLItem, len(paginated))
+	copy(result, paginated)
+
+	return result, total, filtered
+}
