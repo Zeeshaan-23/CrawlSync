@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"crawlsync/internal/controller"
+	"crawlsync/internal/server"
 	"crawlsync/internal/state"
 	"crawlsync/internal/urlmanager"
 )
@@ -27,12 +28,20 @@ func main() {
 	retryFailed := flag.Bool("retry-failed", false, "Retry previously failed URLs when resuming")
 	storageDirFlag := flag.String("dir", "data/pages", "Storage directory for downloaded HTML pages")
 	checkpointDirFlag := flag.String("checkpoint-dir", "", "Directory containing checkpoints (defaults to data/checkpoints or relative to storage dir)")
+	serve := flag.Bool("serve", false, "Enable REST API server mode")
+	port := flag.Int("port", 8080, "REST API server port (1-65535)")
+	host := flag.String("host", "127.0.0.1", "REST API server bind host")
 	flag.Parse()
 
 	explicitFlags := make(map[string]bool)
 	flag.Visit(func(f *flag.Flag) {
 		explicitFlags[f.Name] = true
 	})
+
+	if *serve {
+		runServerMode(*host, *port, *storageDirFlag, *checkpointDirFlag, *workers, *checkpointInterval, *allowLocal)
+		return
+	}
 
 	fmt.Println("==================================================")
 	if *resume {
@@ -223,4 +232,83 @@ func resolveCheckpointDir(cliCheckpointDir, cliStorageDir string, explicitCheckp
 		return cliCheckpointDir
 	}
 	return filepath.Join(filepath.Dir(cliStorageDir), "checkpoints")
+}
+
+// runServerMode starts CrawlSync in REST API server mode.
+//
+// OS CONCEPT - SERVICE DAEMONIZATION & CLEAN DECOUPLING:
+// The server operates as an HTTP service daemon without spawning any crawler
+// threads or controllers until an explicit client request is accepted.
+func runServerMode(host string, port int, storageDir, checkpointDir string, workers int, cpInterval time.Duration, allowLocal bool) {
+	if port < 1 || port > 65535 {
+		fmt.Printf("[Server ERROR] Invalid port %d: must be between 1 and 65535\n", port)
+		os.Exit(1)
+	}
+
+	if checkpointDir == "" {
+		checkpointDir = filepath.Join(filepath.Dir(storageDir), "checkpoints")
+	}
+
+	svc := server.NewCrawlerService(server.ServiceOptions{
+		DefaultStorageDir:         storageDir,
+		DefaultCheckpointDir:      checkpointDir,
+		DefaultWorkerCount:        workers,
+		DefaultCheckpointInterval: cpInterval,
+		AllowLocal:                allowLocal,
+	})
+
+	srv, err := server.NewServer(server.ServerConfig{
+		Host:    host,
+		Port:    port,
+		Service: svc,
+	})
+	if err != nil {
+		fmt.Printf("[Server ERROR] Initialization failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("==================================================")
+	fmt.Println(" CrawlSync - Phase 7 REST API Server Mode")
+	fmt.Println("==================================================")
+	fmt.Printf("Bind Address:        http://%s\n", srv.Addr())
+	fmt.Printf("Storage Directory:   %s\n", storageDir)
+	fmt.Printf("Checkpoint Directory:%s\n", checkpointDir)
+	fmt.Printf("Default Workers:     %d\n", workers)
+	fmt.Printf("Checkpoint Interval: %v\n", cpInterval)
+	fmt.Printf("Allow Local IPs:     %t\n", allowLocal)
+	fmt.Println("--------------------------------------------------")
+	fmt.Println("Endpoints:")
+	fmt.Println("  POST /api/crawl/start      - Start or resume a crawl")
+	fmt.Println("  GET  /api/crawl/status     - Get current crawl status")
+	fmt.Println("  GET  /api/crawl/stats      - Get crawl statistics")
+	fmt.Println("  POST /api/crawl/pause      - Pause crawling")
+	fmt.Println("  POST /api/crawl/resume     - Resume crawling")
+	fmt.Println("  POST /api/crawl/stop       - Stop crawling gracefully")
+	fmt.Println("  POST /api/crawl/checkpoint - Trigger manual checkpoint")
+	fmt.Println("  GET  /api/workers          - Worker pool monitoring")
+	fmt.Println("  GET  /api/urls             - List and filter URLs")
+	fmt.Println("  GET  /api/urls/{id}        - Get URL detail by sequence ID")
+	fmt.Println("--------------------------------------------------")
+	fmt.Println("[Server] Ready to accept API requests. Press Ctrl+C to shut down.")
+
+	if err := srv.Start(); err != nil {
+		fmt.Printf("[Server ERROR] Failed to start server: %v\n", err)
+		os.Exit(1)
+	}
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	<-sigChan
+
+	fmt.Println("\n[Server] Shutdown signal received. Performing graceful shutdown...")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), srv.ShutdownTimeout())
+	defer cancel()
+
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		fmt.Printf("[Server ERROR] Graceful shutdown error: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("[Server] Server stopped cleanly.")
 }

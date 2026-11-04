@@ -323,3 +323,114 @@
   - `go test -v -count=1 ./internal/server/...`: ALL PASSED (17 tests)
   - `go test -count=1 -race ./internal/server/...`: ALL PASSED (0 data races)
   - `go test -count=1 -race ./...`: ALL PASSED across all packages
+
+### Stage 3: HTTP Handlers, Routing, Models, and Middleware
+- **Implementation Summary:**
+  - **API Models (`internal/server/models.go`):**
+    - Standard response envelopes: `APIResponse{Success, Data}` and `APIErrorResponse{Success: false, Error: {Code, Message, Details}}`.
+    - DTOs: `StartCrawlRequestDTO` (safely excludes `allow_local` to prevent client SSRF override), `StartCrawlResponseDTO`, `CrawlStatusResponseDTO`, `CrawlStatsResponseDTO`, `ControlActionResponseDTO`, `CheckpointResponseDTO`, `WorkerInfoResponseDTO`, `WorkerListResponseDTO`, `URLItemResponseDTO`, `URLListResponseDTO`, and `PaginationResponseDTO`.
+  - **Middleware (`internal/server/middleware.go`):**
+    - `RecoveryMiddleware`: catches unhandled panics, logs stack trace, returns HTTP 500 JSON envelope without terminating process.
+    - `JSONContentTypeMiddleware`: enforces `Content-Type: application/json; charset=utf-8` on all outgoing API responses.
+    - `LoggingMiddleware`: logs method, URI path, status code, and execution duration.
+    - `CORSMiddleware`: configurable CORS policy without wildcard `*` by default; handles `OPTIONS` preflight with `204 No Content` and caches headers (`Max-Age: 86400`).
+  - **Routing & Handlers (`internal/server/handlers.go` and `internal/server/handlers_url.go`):**
+    - Leverages Go 1.22+ `http.ServeMux` pattern-based routing with explicit HTTP methods and path variables (`GET /api/urls/{id}`).
+    - Strict JSON decoding:
+      - `http.MaxBytesReader` caps request bodies at 1 MB.
+      - `decoder.DisallowUnknownFields()` detects and rejects injected fields.
+      - Trailing content enforcement: calls `decoder.Decode(&extra)` a second time and strictly requires `io.EOF`, rejecting multiple consecutive JSON objects, arbitrary trailing text, or trailing JSON values (numbers, strings, booleans, arrays).
+    - Comprehensive input validation:
+      - Validates URL scheme (`http` / `https`), non-empty host, and valid URL syntax.
+      - Range checks for worker counts, page limits, depth bounds, and timeout values.
+      - Aligned URL query parameter pagination bounds sharing `urlmanager` constants (`DefaultPaginationLimit = 20`, `MaxPaginationLimit = 100`, `DefaultPaginationOffset = 0`, `MinPaginationOffset = 0`). Rejects `limit < 1`, `limit > 100`, `offset < 0`.
+      - URL query filters: whitelist validation for status (`pending`, `in_progress`, `completed`, `failed`), depth, and sort modes (`seq_asc`, `seq_desc`, `depth_asc`, `depth_desc`, `time_desc`).
+      - URL sequence parsing: enforces positive `int64` sequence IDs with proper 400 Bad Request error envelopes.
+    - Standard error translation:
+      - Maps service errors (`ErrCrawlAlreadyRunning`, `ErrCrawlStopping`, `ErrPreviousSessionTerminating`) to HTTP 409 Conflict.
+      - Maps `ErrNoActiveCrawl` and sequence lookups not found to HTTP 404 Not Found.
+      - Maps invalid parameters to HTTP 400 Bad Request.
+      - Unregistered HTTP methods on registered paths return HTTP 405 Method Not Allowed via Go 1.22 ServeMux routing.
+- **Automated Tests (`internal/server/handlers_test.go` and `internal/server/service_test.go`):**
+  - **Handler Tests (24 top-level test functions + 15 subtests):**
+    1. `TestHandlers_SuccessfulResponses`: all endpoints return expected codes and envelopes.
+    2. `TestHandlers_InvalidJSON`: malformed syntax rejected.
+    3. `TestHandlers_MissingRequiredFields`: missing seed URL rejected.
+    4. `TestHandlers_UnknownJSONFields`: unrecognized fields rejected by `DisallowUnknownFields`.
+    5. `TestHandlers_OversizedRequestBody`: payloads > 1 MB rejected.
+    6. `TestHandlers_InvalidURLSchemes`: non-http(s) schemes rejected.
+    7. `TestHandlers_InvalidNumericConfiguration`: invalid workers, pages, depth, timeouts rejected.
+    8. `TestHandlers_InvalidPaginationParameters`: invalid strings/negatives rejected.
+    9. `TestHandlers_PaginationBoundsAndDefaults`: subtests for no limit (default 20), limit 0, limit 100, limit 101, negative offset, offset beyond filtered count.
+    10. `TestHandlers_InvalidURLStatusFilters`: invalid status string rejected.
+    11. `TestHandlers_InvalidSortingValues`: invalid sort option rejected.
+    12. `TestHandlers_MissingURLSequence`: empty ID in path returns 404.
+    13. `TestHandlers_InvalidURLSequence`: non-positive or non-numeric IDs return 400.
+    14. `TestHandlers_NoActiveCrawl`: queries when idle/stopped return 404.
+    15. `TestHandlers_ConflictingLifecycleOperations`: duplicate starts return 409.
+    16. `TestHandlers_UnsupportedHTTPMethods`: wrong methods return 405.
+    17. `TestHandlers_ConsistentResponseEnvelopes`: verifies envelope format and success flag.
+    18. `TestHandlers_PanicRecoveryMiddleware`: verifies unhandled panics produce 500 error envelope without crashing process.
+    19. `TestHandlers_ConcurrentReadOnlyRequests`: concurrent GET requests under race detector.
+    20. `TestHandlers_ConcurrentLifecycleRequests`: concurrent pause, resume, checkpoint, stop under race detector.
+    21. `TestHandlers_ManualCheckpointEndpoint`: manual checkpointing via HTTP.
+    22. `TestHandlers_WorkerStateEndpoint`: worker pool monitor inspection.
+    23. `TestHandlers_MultipleJSONValuesRejected`: subtests for single JSON (accepted), consecutive objects (rejected), trailing arbitrary text (rejected), trailing values (numbers, strings, booleans, arrays, null rejected).
+    24. `TestHandlers_CORSVerification`: CORS preflight, allowed and disallowed origin handling.
+  - **Service Tests (17 top-level test functions):**
+    1-17 covering lifecycle transitions, deadlock avoidance, generation tracking, and recovery.
+- **Verification Output:**
+  - `go vet ./...`: PASSED (0 warnings)
+  - `go test -v -count=1 ./internal/server/...`: ALL PASSED (41 top-level test functions, 15 subtests, 56 total test executions)
+  - `go test -count=1 -race ./internal/server/...`: ALL PASSED (0 data races)
+  - `go test -count=1 -race ./...`: ALL PASSED across all packages (124 tests)
+
+### Stage 4: HTTP Server Lifecycle and CLI Integration
+- **Implementation Summary:**
+  - **HTTP Server Abstraction (`internal/server/server.go`):**
+    - `ServerConfig` encapsulates host, port, ephemeral port support, service reference, CORS origins, and bounded timeouts.
+    - Standard library bounded server settings:
+      - `ReadHeaderTimeout`: 5 seconds
+      - `ReadTimeout`: 15 seconds
+      - `WriteTimeout`: 30 seconds (bounded buffer for checkpoint persistence)
+      - `IdleTimeout`: 60 seconds
+      - `MaxHeaderBytes`: 1 MB (`1 << 20`)
+      - `ShutdownTimeout`: 15 seconds
+    - `Server.Start()`: synchronous TCP socket bind via `net.Listen`, captures dynamic port if ephemeral, starts background `httpServer.Serve(l)` goroutine with clean `http.ErrServerClosed` handling.
+    - `Server.Shutdown(ctx)`:
+      1. Disables keep-alives via `httpServer.SetKeepAlivesEnabled(false)` to close idle connections.
+      2. Closes listener and drains in-flight HTTP requests via `httpServer.Shutdown(ctx)`.
+      3. Coordinates graceful crawler stop via `s.service.Shutdown(ctx)`, which stops the active Controller, drains worker pool results, and commits the `"shutdown"` checkpoint.
+      4. Aggregates and logs any timeout or cleanup errors using `errors.Join`.
+    - `Server.ListenAndServe()`: blocks until shutdown completes.
+    - Repeated lifecycle safety: reinstantiates internal `http.Server` on each `Start()` cycle to allow servers to be started and stopped repeatedly without error.
+  - **Server Binding & Security:**
+    - Binds strictly to `127.0.0.1:8080` by default.
+    - Operator-controlled SSRF enforcement (`AllowLocal`) is preserved from server startup options; client request payloads cannot override it.
+    - Emits a security notice if an operator binds beyond loopback interfaces (`127.0.0.1`, `localhost`, `::1`), warning that authentication or reverse proxy protection is required.
+  - **CLI Mode Coexistence (`cmd/crawlsync/main.go`):**
+    - Added CLI flags: `--serve`, `--port` (default 8080), `--host` (default 127.0.0.1).
+    - When `--serve` is omitted: runs existing terminal crawler mode with 100% backward compatibility (seeds, workers, depth, `--resume`, `--retry-failed`, stats).
+    - When `--serve` is specified: initializes `CrawlerService` without starting a Controller or worker pool upfront; starts HTTP server and blocks until SIGINT/SIGTERM triggers graceful shutdown.
+- **Automated Tests (`internal/server/server_test.go`):**
+  - 14 top-level test functions:
+    1. `TestServer_Construction`: verifies valid construction, defaults, and error on nil service.
+    2. `TestServer_RouteRegistration`: verifies routes are registered and respond properly.
+    3. `TestServer_StartsSuccessfully`: verifies server starts and sets running flag.
+    4. `TestServer_ListensOnAvailableLocalPort`: verifies ephemeral port allocation on localhost.
+    5. `TestServer_StatusEndpointRespondsOverActualHTTP`: makes live HTTP GET request to `/api/crawl/status`.
+    6. `TestServer_AllAPIRoutesReachable`: tests all 10 API routes over live HTTP connections.
+    7. `TestServer_InvalidHostPortConfiguration`: verifies rejection of invalid ports and host IPs.
+    8. `TestServer_GracefulShutdown`: verifies clean termination and socket closure.
+    9. `TestServer_ShutdownWithActiveCrawl`: verifies server shutdown stops active crawl and commits checkpoint.
+    10. `TestServer_ShutdownWhilePaused`: verifies server shutdown cleanly stops paused crawls.
+    11. `TestServer_NoCrawlerCreatedMerelyByStartingServer`: verifies service remains `IDLE` with nil controller on startup.
+    12. `TestServer_StartStopRepeatedlyNoGoroutineLeaks`: verifies server can start and stop across multiple cycles.
+    13. `TestServer_ExistingMiddlewareRemainsActive`: verifies JSON headers, CORS preflight, and 405 Method Not Allowed.
+    14. `TestServer_ShutdownDoesNotRaceWithConcurrentRequests`: runs 15 concurrent HTTP workers during server shutdown under race detector.
+- **Verification Output:**
+  - `go vet ./...`: PASSED (0 warnings)
+  - `go test -v -count=1 ./internal/server/...`: ALL PASSED (55 top-level test functions, 15 subtests, 70 total test executions)
+  - `go test -count=1 -race ./internal/server/...`: ALL PASSED (0 data races)
+  - `go test -count=1 -race ./...`: ALL PASSED across all packages (138 tests)
+  - CLI binary build: `go build -o crawlsync.exe ./cmd/crawlsync` succeeded; verified `--help`, CLI mode, and `--serve` mode over live HTTP.

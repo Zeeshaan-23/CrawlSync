@@ -40,9 +40,11 @@ var (
 
 // ServiceOptions configures the defaults and operator-controlled permissions for the CrawlerService.
 type ServiceOptions struct {
-	DefaultStorageDir    string
-	DefaultCheckpointDir string
-	AllowLocal           bool // Operator-controlled: controls access to localhost/private networks (SSRF defense)
+	DefaultStorageDir         string
+	DefaultCheckpointDir      string
+	DefaultWorkerCount        int
+	DefaultCheckpointInterval time.Duration
+	AllowLocal                bool // Operator-controlled: controls access to localhost/private networks (SSRF defense)
 }
 
 // StartCrawlRequest contains client parameters to start or resume a crawl.
@@ -188,7 +190,11 @@ func (s *CrawlerService) StartCrawl(req StartCrawlRequest) (*CrawlSessionInfo, e
 
 	workerCount := req.Workers
 	if workerCount < 1 {
-		workerCount = 4
+		if s.options.DefaultWorkerCount > 0 {
+			workerCount = s.options.DefaultWorkerCount
+		} else {
+			workerCount = 4
+		}
 	}
 	if workerCount > 20 {
 		workerCount = 20
@@ -211,7 +217,11 @@ func (s *CrawlerService) StartCrawl(req StartCrawlRequest) (*CrawlSessionInfo, e
 
 	cpInterval := req.CheckpointInterval
 	if cpInterval <= 0 {
-		cpInterval = 30 * time.Second
+		if s.options.DefaultCheckpointInterval > 0 {
+			cpInterval = s.options.DefaultCheckpointInterval
+		} else {
+			cpInterval = 30 * time.Second
+		}
 	}
 
 	// 4. Branch: Resume session vs. New session

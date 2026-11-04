@@ -677,8 +677,10 @@ func TestService_OldSessionCompletionCannotModifyNewerSession(t *testing.T) {
 	}, urlmanager.NewManager())
 	oldDone := make(chan struct{})
 
-	// Supervise with old session ID
-	s.superviseSession(oldCtrl, context.Background(), "session_1_old", oldDone)
+	// Supervise with old session ID using an already-canceled context so Run returns immediately
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s.superviseSession(oldCtrl, ctx, "session_1_old", oldDone)
 
 	// Verify that session 2's state was NOT altered
 	s.mu.RLock()

@@ -440,6 +440,18 @@ func (m *Manager) GetBySequence(seq int64) (*URLItem, bool) {
 	return nil, false
 }
 
+// Pagination configuration constants
+const (
+	// DefaultPaginationLimit is the default page size when limit is unspecified.
+	DefaultPaginationLimit = 20
+	// MaxPaginationLimit is the maximum permissible page size.
+	MaxPaginationLimit = 100
+	// DefaultPaginationOffset is the default 0-based offset.
+	DefaultPaginationOffset = 0
+	// MinPaginationOffset is the minimum allowable offset.
+	MinPaginationOffset = 0
+)
+
 // URLFilterOptions configures filtering, sorting, and pagination for URL queries.
 type URLFilterOptions struct {
 	Status *URLStatus // Optional status filter
@@ -459,14 +471,14 @@ func (m *Manager) GetFilteredURLs(opts URLFilterOptions) (items []URLItem, total
 	// Normalize pagination bounds
 	limit := opts.Limit
 	if limit <= 0 {
-		limit = 20
+		limit = DefaultPaginationLimit
 	}
-	if limit > 100 {
-		limit = 100
+	if limit > MaxPaginationLimit {
+		limit = MaxPaginationLimit
 	}
 	offset := opts.Offset
-	if offset < 0 {
-		offset = 0
+	if offset < MinPaginationOffset {
+		offset = MinPaginationOffset
 	}
 
 	m.mu.RLock()
