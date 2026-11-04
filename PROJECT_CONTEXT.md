@@ -185,7 +185,7 @@ This is a target. Create folders only when a phase needs them.
 | 2 | Parser, URL normalization, `TrySchedule`, duplicate detection (+ unit tests) | Verified |
 | 3 | Worker pool + controller, results channel, termination detection | Verified |
 | 4 | Checkpoint Creation and Persistence (atomic JSON, periodic, shutdown) | Verified |
-| 5 | Synchronization hardening, pause/resume via context | Planned |
+| 5 | Synchronization hardening, pause/resume via context | Verified |
 | 6 | Recovery: restore session, `in_progress` to `pending`, resume | Planned |
 | 7 | HTTP server + REST API (`/api/start`, `/stats`, `/pause`, `/resume`, `/stop`, `/checkpoint`, `/restore`) | Planned |
 | 8 | Dashboard UI + live monitoring + controls | Planned |

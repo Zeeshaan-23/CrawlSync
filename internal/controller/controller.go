@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"path/filepath"
@@ -12,6 +13,42 @@ import (
 	"crawlsync/internal/state"
 	"crawlsync/internal/urlmanager"
 )
+
+// ControllerState represents the operational status of the crawler.
+type ControllerState string
+
+const (
+	StateReady   ControllerState = "READY"
+	StateRunning ControllerState = "RUNNING"
+	StatePaused  ControllerState = "PAUSED"
+	StateStopped ControllerState = "STOPPED"
+)
+
+// Sentinel lifecycle errors
+var (
+	ErrAlreadyStarted = errors.New("controller has already been started")
+	ErrAlreadyStopped = errors.New("controller has already stopped")
+)
+
+type controlCmd int
+
+const (
+	cmdPause controlCmd = iota
+	cmdResume
+	cmdStop
+	cmdCheckpoint
+)
+
+type checkpointResult struct {
+	cp  *state.Checkpoint
+	err error
+}
+
+type controlRequest struct {
+	cmd            controlCmd
+	ackChan        chan struct{}
+	checkpointChan chan checkpointResult
+}
 
 // Config specifies the runtime configuration for a crawl session.
 type Config struct {
@@ -44,7 +81,8 @@ func DefaultConfig(startURL string) Config {
 }
 
 // Controller coordinates the crawling session, acts as the single scheduler,
-// manages the worker pool, triggers periodic checkpoints, and detects crawl completion.
+// manages the worker pool, triggers periodic checkpoints, handles runtime pause/resume,
+// and detects crawl completion.
 //
 // OS CONCEPT - SINGLE OWNER SCHEDULER & DEADLOCK AVOIDANCE:
 // In classical multithreaded systems, deadlock occurs when producer and consumer mutually
@@ -52,8 +90,8 @@ func DefaultConfig(startURL string) Config {
 // Workers are blocked sending to full Results channel).
 //
 // CrawlSync prevents this deadlock using an internal pending slice combined with a dynamic
-// select multiplexer. If the jobs channel is full, the controller does not block; it remains
-// continuously ready to drain the results channel.
+// select multiplexer. If the jobs channel is full or the controller is paused, the controller
+// does not block; it remains continuously ready to drain the results channel and handle control requests.
 type Controller struct {
 	config            Config
 	sessionID         string
@@ -64,6 +102,15 @@ type Controller struct {
 
 	// Synchronization & Goroutine management
 	wg sync.WaitGroup
+
+	// Runtime control & state management (Phase 5)
+	stateMu     sync.RWMutex
+	state       ControllerState
+	started     bool
+	controlChan chan controlRequest
+	doneChan    chan struct{}
+	doneOnce    sync.Once
+	stopCancel  context.CancelFunc
 }
 
 // NewController creates and initializes a Controller with its components.
@@ -108,6 +155,9 @@ func NewController(cfg Config, mgr *urlmanager.Manager) (*Controller, error) {
 		checkpointManager: cm,
 		workerPool:        wp,
 		fetcher:           f,
+		state:             StateReady,
+		controlChan:       make(chan controlRequest, 10),
+		doneChan:          make(chan struct{}),
 	}, nil
 }
 
@@ -116,9 +166,37 @@ func NewController(cfg Config, mgr *urlmanager.Manager) (*Controller, error) {
 // OS CONCEPTS DEMONSTRATED:
 // 1. Thread Pool Lifecycle: Worker pool spawned, jobs dispatched, channels drained and closed.
 // 2. Preemption & Cancellation: Respects context.Context cancellation signals.
-// 3. Periodic Checkpointing & Durability: Checkpoint taken at clean event-loop boundaries.
-// 4. Termination Detection: Crawl ends when: (pending in queue == 0) AND (in-flight jobs == 0).
-func (c *Controller) Run(ctx context.Context) error {
+// 3. Runtime Scheduling Control: Dynamic select multiplexing enables pause/resume without busy loops.
+// 4. Periodic Checkpointing & Durability: Checkpoint taken at clean event-loop boundaries.
+// 5. Termination Detection: Crawl ends when: (pending in queue == 0) AND (in-flight jobs == 0).
+func (c *Controller) Run(parentCtx context.Context) error {
+	ctx, cancel := context.WithCancel(parentCtx)
+	defer cancel()
+
+	c.stateMu.Lock()
+	if c.started {
+		c.stateMu.Unlock()
+		return ErrAlreadyStarted
+	}
+	if c.state == StateStopped {
+		c.stateMu.Unlock()
+		return ErrAlreadyStopped
+	}
+	c.started = true
+	isInitiallyPaused := (c.state == StatePaused)
+	if !isInitiallyPaused {
+		c.state = StateRunning
+	}
+	c.stopCancel = cancel
+	c.stateMu.Unlock()
+
+	defer func() {
+		c.stateMu.Lock()
+		c.state = StateStopped
+		c.stateMu.Unlock()
+		c.closeDone()
+	}()
+
 	// 1. Normalize and schedule initial seed URL
 	sched, normStartURL, err := c.urlManager.TrySchedule(c.config.StartURL, 0)
 	if err != nil {
@@ -152,23 +230,25 @@ func (c *Controller) Run(ctx context.Context) error {
 	pendingJobs = append(pendingJobs, Job{URL: normStartURL, Depth: 0})
 
 	inFlight := 0
+	paused := isInitiallyPaused
 
 	// 6. Main Event Loop
 	for {
 		// Check completion condition:
 		// Both the internal queue must be empty AND no jobs may be in-flight.
-		// OS CONCEPT: Accurate termination detection requires zero active consumers and empty buffer.
+		// OS CONCEPT: A paused crawler with pending work does NOT terminate because len(pendingJobs) > 0.
+		// Crawl terminates only when genuinely completed with zero pending and zero in-flight tasks.
 		if len(pendingJobs) == 0 && inFlight == 0 {
 			break
 		}
 
 		// Dynamically enable/disable sending into jobsChan in the select statement.
-		// If pendingJobs has items, sendChan is jobsChan.
-		// If pendingJobs is empty, sendChan is nil (nil channels in Go select are never ready,
-		// preventing busy-waiting while keeping resultsChan active).
+		// If paused, sendChan is nil (disabling dispatch).
+		// If running and pendingJobs has items, sendChan is jobsChan.
+		// If running and pendingJobs is empty, sendChan is nil.
 		var sendChan chan Job
 		var nextJob Job
-		if len(pendingJobs) > 0 {
+		if !paused && len(pendingJobs) > 0 {
 			sendChan = jobsChan
 			nextJob = pendingJobs[0]
 		}
@@ -197,6 +277,43 @@ func (c *Controller) Run(ctx context.Context) error {
 			_ = c.saveCheckpoint("shutdown")
 			return ctx.Err()
 
+		case req := <-c.controlChan:
+			// OS CONCEPT - RUNTIME CONTROL COMMAND MULTIPLEXING:
+			// Handle Pause and Resume requests sequentially within the single-owner scheduler loop.
+			switch req.cmd {
+			case cmdPause:
+				if !paused {
+					paused = true
+					c.stateMu.Lock()
+					c.state = StatePaused
+					c.stateMu.Unlock()
+					log.Println("[Controller] Crawl session paused")
+				}
+				req.ackChan <- struct{}{}
+
+			case cmdResume:
+				if paused {
+					paused = false
+					c.stateMu.Lock()
+					c.state = StateRunning
+					c.stateMu.Unlock()
+					log.Println("[Controller] Crawl session resumed")
+				}
+				req.ackChan <- struct{}{}
+
+			case cmdStop:
+				if req.ackChan != nil {
+					req.ackChan <- struct{}{}
+				}
+				cancel()
+
+			case cmdCheckpoint:
+				cp, err := c.doSaveCheckpoint("manual")
+				if req.checkpointChan != nil {
+					req.checkpointChan <- checkpointResult{cp: cp, err: err}
+				}
+			}
+
 		case sendChan <- nextJob:
 			// Dispatched job into worker channel
 			pendingJobs = pendingJobs[1:]
@@ -206,25 +323,24 @@ func (c *Controller) Run(ctx context.Context) error {
 			// Check error to ensure accounting consistency between inFlight and URL Manager.
 			if err := c.urlManager.MarkInProgress(nextJob.URL); err != nil {
 				log.Printf("[Controller WARN] failed transitioning %s to in_progress: %v", nextJob.URL, err)
-				// Reconcile inFlight count if status update failed unexpectedly
 				inFlight--
 			}
 
 		case res := <-resultsChan:
-			// Worker returned a result for a completed or failed job
+			// Worker returned a result for a completed or failed job.
+			// Note: Even while paused, results from already-dispatched workers continue to be processed.
 			inFlight--
 			c.handleCrawlResult(res, &pendingJobs, true)
 
 		case <-checkpointChan:
 			// OS CONCEPT - CONSISTENT SNAPSHOT BOUNDARY:
-			// Periodic checkpoint fires at the top of the event loop, ensuring no worker result
-			// is half-processed (parent completed but children not yet scheduled).
+			// Periodic checkpoint fires at the top of the event loop.
+			// Continues to function while paused, capturing any completed in-flight results.
 			_ = c.saveCheckpoint("periodic")
 		}
 	}
 
 	// 7. Graceful Termination Sequence:
-	// Exactly one closer for jobsChan
 	close(jobsChan)
 
 	// Wait for all workers to notice EOF on jobsChan and terminate their goroutines
@@ -245,6 +361,134 @@ Finished:
 	_ = c.saveCheckpoint("completion")
 
 	return nil
+}
+
+// Pause pauses job dispatch without cancelling active workers or dropping state.
+// Idempotent: safe to call repeatedly or when stopped.
+func (c *Controller) Pause() error {
+	c.stateMu.RLock()
+	st := c.state
+	c.stateMu.RUnlock()
+
+	if st == StateStopped {
+		return nil // Harmless no-op
+	}
+	if st == StatePaused {
+		return nil // Already paused (idempotent)
+	}
+	if st == StateReady {
+		c.stateMu.Lock()
+		c.state = StatePaused
+		c.stateMu.Unlock()
+		return nil
+	}
+
+	ack := make(chan struct{}, 1)
+	req := controlRequest{
+		cmd:     cmdPause,
+		ackChan: ack,
+	}
+
+	select {
+	case c.controlChan <- req:
+		select {
+		case <-ack:
+			return nil
+		case <-c.doneChan:
+			return nil
+		}
+	case <-c.doneChan:
+		return nil
+	}
+}
+
+// Resume unpauses job dispatch.
+// Idempotent: safe to call repeatedly or when stopped.
+func (c *Controller) Resume() error {
+	c.stateMu.RLock()
+	st := c.state
+	c.stateMu.RUnlock()
+
+	if st == StateStopped {
+		return nil // Harmless no-op
+	}
+	if st == StateRunning {
+		return nil // Already running (idempotent)
+	}
+	if st == StateReady {
+		c.stateMu.Lock()
+		c.state = StateRunning
+		c.stateMu.Unlock()
+		return nil
+	}
+
+	ack := make(chan struct{}, 1)
+	req := controlRequest{
+		cmd:     cmdResume,
+		ackChan: ack,
+	}
+
+	select {
+	case c.controlChan <- req:
+		select {
+		case <-ack:
+			return nil
+		case <-c.doneChan:
+			return nil
+		}
+	case <-c.doneChan:
+		return nil
+	}
+}
+
+// Stop initiates a clean graceful shutdown of the controller.
+// Idempotent: safe to call repeatedly or when already stopped.
+func (c *Controller) Stop() error {
+	c.stateMu.Lock()
+	if c.state == StateStopped {
+		c.stateMu.Unlock()
+		return nil
+	}
+	cancel := c.stopCancel
+	if cancel == nil {
+		c.state = StateStopped
+		c.stateMu.Unlock()
+		c.closeDone()
+		return nil
+	}
+	c.stateMu.Unlock()
+
+	cancel()
+	<-c.doneChan
+	return nil
+}
+
+// State returns the current operational state of the controller.
+func (c *Controller) State() ControllerState {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	return c.state
+}
+
+// IsPaused reports whether the controller is currently paused.
+func (c *Controller) IsPaused() bool {
+	return c.State() == StatePaused
+}
+
+// IsRunning reports whether the controller is actively dispatching jobs.
+func (c *Controller) IsRunning() bool {
+	return c.State() == StateRunning
+}
+
+// IsStopped reports whether the controller has terminated.
+func (c *Controller) IsStopped() bool {
+	return c.State() == StateStopped
+}
+
+func (c *Controller) closeDone() {
+	c.doneOnce.Do(func() {
+		close(c.doneChan)
+	})
 }
 
 // handleCrawlResult applies the status transition for a finished worker job.
@@ -276,6 +520,11 @@ func (c *Controller) handleCrawlResult(res CrawlResult, pendingJobs *[]Job, allo
 // saveCheckpoint captures a consistent snapshot of the URL Manager and commits it to disk.
 // Checkpoint errors are logged but do not crash the crawler.
 func (c *Controller) saveCheckpoint(reason string) error {
+	_, err := c.doSaveCheckpoint(reason)
+	return err
+}
+
+func (c *Controller) doSaveCheckpoint(reason string) (*state.Checkpoint, error) {
 	snap := c.urlManager.Snapshot()
 
 	checkpointCfg := state.CheckpointConfig{
@@ -290,26 +539,46 @@ func (c *Controller) saveCheckpoint(reason string) error {
 	cp, err := c.checkpointManager.Save(c.sessionID, checkpointCfg, snap)
 	if err != nil {
 		log.Printf("[Checkpoint WARN] Failed saving %s checkpoint: %v", reason, err)
-		return err
+		return nil, err
 	}
 
 	log.Printf("[Checkpoint] Successfully saved %s checkpoint #%d (Discovered: %d, Completed: %d, Pending: %d)",
 		reason, cp.Sequence, snap.Stats.TotalDiscovered, snap.Stats.Completed, snap.Stats.Pending)
-	return nil
+	return cp, nil
 }
 
 // CreateCheckpoint manually triggers an immediate checkpoint save.
+// OS CONCEPT - ATOMIC SNAPSHOT CONSISTENCY:
+// When the controller is running or paused, the request is multiplexed through the
+// event loop to ensure it executes at a clean boundary where no partial result processing
+// (e.g. parent marked completed but discovered children not yet scheduled) is underway.
 func (c *Controller) CreateCheckpoint() (*state.Checkpoint, error) {
-	snap := c.urlManager.Snapshot()
-	checkpointCfg := state.CheckpointConfig{
-		StartURL:       c.config.StartURL,
-		WorkerCount:    c.config.WorkerCount,
-		MaxPages:       c.config.MaxPages,
-		MaxDepth:       c.config.MaxDepth,
-		RequestTimeout: c.config.RequestTimeout.String(),
-		SameDomainOnly: c.config.SameDomainOnly,
+	c.stateMu.RLock()
+	st := c.state
+	c.stateMu.RUnlock()
+
+	// If controller is ready or stopped, no worker or event-loop interleaving can occur.
+	if st == StateReady || st == StateStopped {
+		return c.doSaveCheckpoint("manual")
 	}
-	return c.checkpointManager.Save(c.sessionID, checkpointCfg, snap)
+
+	cpChan := make(chan checkpointResult, 1)
+	req := controlRequest{
+		cmd:            cmdCheckpoint,
+		checkpointChan: cpChan,
+	}
+
+	select {
+	case c.controlChan <- req:
+		select {
+		case res := <-cpChan:
+			return res.cp, res.err
+		case <-c.doneChan:
+			return c.doSaveCheckpoint("manual")
+		}
+	case <-c.doneChan:
+		return c.doSaveCheckpoint("manual")
+	}
 }
 
 // scheduleDiscoveredLinks filters and schedules newly extracted hyperlinks.

@@ -217,6 +217,13 @@ func Validate(cp *Checkpoint) error {
 	return nil
 }
 
+// SaveCount returns the total number of checkpoints saved by this manager.
+func (cm *CheckpointManager) SaveCount() int64 {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	return cm.saveCount
+}
+
 // GetDirectory returns the configured checkpoint directory.
 func (cm *CheckpointManager) GetDirectory() string {
 	return cm.dir

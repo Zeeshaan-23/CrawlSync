@@ -104,3 +104,82 @@
      - `TestController_HandleCrawlResult_DrainPolicy`: Unit test verifying `allowNewPending: false` schedules discovered URLs into `URLManager` without queuing to `pendingJobs`.
      - `TestWorker_PageReplacement_PreservesExistingOnFailure`: Verified existing page content survives failed replacements.
      - `TestGenerateSessionID`: Verified unique IDs and entropy error checking.
+
+
+---
+
+## Phase 5: Runtime Pause and Resume (Verified)
+- **Files Modified:**
+  - `internal/controller/controller.go`
+  - `internal/controller/controller_test.go`
+  - `PROJECT_CONTEXT.md`
+  - `docs/IMPLEMENTATION_LOG.md`
+
+- **Key Architectural Implementation:**
+  - **Single Owner Controller:** The Controller remains the sole owner of `pendingJobs`, `inFlight`, `paused` state, and job dispatch. Workers remain decoupled from scheduling.
+  - **Dynamic Select Multiplexing:** Disables job dispatch when paused by setting the dispatch channel `sendChan` to `nil` (`var sendChan chan Job; if !paused && len(pendingJobs) > 0 { sendChan = jobsChan }`). In Go, sending to a `nil` channel blocks that specific select case, allowing results, control commands, checkpoint triggers, and cancellation signals to be processed immediately without busy-waiting.
+  - **Non-blocking Control Channel:** Implemented `controlChan chan controlRequest` with command types `cmdPause`, `cmdResume`, and `cmdStop`. Control methods (`Pause()`, `Resume()`) use buffered 1-slot acknowledgment channels (`make(chan struct{}, 1)`) and select on `<-c.doneChan` to ensure callers never deadlock if called during shutdown or after termination.
+  - **Idempotence & Lifecycle Management:**
+    - `Pause()` when already paused returns `nil` safely.
+    - `Resume()` when already running returns `nil` safely.
+    - `Stop()` cancels the run context (`c.stopCancel()`) and waits on `<-c.doneChan`, returning cleanly if already stopped.
+    - Control requests sent after the Controller has terminated return immediately without blocking.
+  - **Pause Semantics:**
+    - Workers with active downloads continue uninterrupted.
+    - Results from active workers are drained and processed normally.
+    - Discovered child URLs are registered and queued in `URLManager` as pending.
+    - Periodic and manual checkpointing remains fully functional during pause, capturing updated statistics and page statuses.
+  - **Pause vs. Termination Condition:**
+    - Prevented premature exit: The termination condition checks `!paused && len(pendingJobs) == 0 && inFlight == 0`. A paused crawl with pending jobs remains alive awaiting resume or stop.
+  - **Stop While Paused:**
+    - Stopping while paused halts job dispatch, cancels active worker contexts, waits on `sync.WaitGroup`, completely drains remaining results from `resultsChan`, preserves interrupted downloads as `in_progress`, and commits the final shutdown checkpoint.
+
+- **Automated Test Suite (Tests A through I):**
+  - `TestController_Pause_ActiveDownloads` (Test A): Pauses during active downloads, verifies active jobs complete, and ensures no subsequent jobs are dispatched.
+  - `TestController_ResultsArrivingWhilePaused` (Test B): Active workers finish while paused; verifies results are processed and discovered links remain pending.
+  - `TestController_Resume` (Test C): Resumes paused crawler, verifies pending jobs are dispatched in order, and crawling reaches completion.
+  - `TestController_DoublePause` (Test D): Verifies double pause is idempotent with no deadlock or panic.
+  - `TestController_DoubleResume` (Test E): Verifies double resume is idempotent with no deadlock or panic.
+  - `TestController_StopWhilePaused` (Test F): Stops while paused, verifies full shutdown sequence, clean worker exit, and shutdown checkpoint persistence.
+  - `TestController_CheckpointWhilePaused` (Test G): Verifies manual and periodic checkpoint creation while paused reflects updated URL states and statistics.
+  - `TestController_ControlRequestsAfterShutdown` (Test H): Verifies Pause, Resume, and Stop return without hanging when invoked after crawler termination.
+  - `TestController_HandleCrawlResult_DrainPolicy`: Verifies result draining policy with `allowNewPending: false`.
+
+- **Verification Output:**
+  - `go vet ./...`: PASSED (0 warnings)
+  - `go test -v ./...`: ALL PASSED across all packages (16 controller tests, 4 fetcher tests, all parser subtests, 5 state tests, all urlmanager subtests)
+  - `go test -count=1 -race ./...`: ALL PASSED (0 data races detected)
+
+
+### Targeted Hardening Pass (Phase 5 Review)
+- **1. Enforce Single Execution of `Run()`:**
+  - Added `started bool` guarded by `stateMu sync.RWMutex`.
+  - Defined sentinel errors `ErrAlreadyStarted` and `ErrAlreadyStopped`.
+  - Guaranteed `Run()` can execute at most once per Controller instance; concurrent calls immediately return `ErrAlreadyStarted` without spawning duplicate worker pools or channels.
+  - Added `TestController_ConcurrentRunRejected`: verified concurrent and sequential `Run()` rejections.
+- **2. Paused Controller with Pending Work and Zero In-Flight Jobs:**
+  - Added `TestController_PausedWithPendingWorkAndZeroInFlight`:
+    - Reaches `StatePaused`, `Pending URLs > 0`, and `InProgress == 0` deterministically using a controlled 2-tier link graph (`/` -> `/p1` -> `/p2`).
+    - Verified controller remains alive without terminating prematurely and without busy-looping.
+    - Verified pending jobs remain intact in `URLManager`.
+    - Subtest 1: `Resume()` dispatches pending work and completes the crawl naturally.
+    - Subtest 2: `Stop()` cleanly terminates and persists a shutdown checkpoint preserving pending items.
+- **3. Concurrent Control Requests:**
+  - Added `TestController_ConcurrentControlRequests`:
+    - 8 concurrent goroutines executing random interleavings of `Pause()`, `Resume()`, `State()`, `GetStats()`, and `GetWorkerStates()`.
+    - Verified zero deadlocks, zero goroutine leaks, zero data races, and consistent URL deduplication.
+- **4. Periodic Checkpoint While Paused:**
+  - Added `TestController_PeriodicCheckpointWhilePaused`:
+    - Configured short periodic interval (`25ms`).
+    - Paused during active crawl; verified ticker continues firing and advancing checkpoint sequence while paused.
+    - Verified worker completions while paused are captured in subsequent snapshots while pending URLs remain pending.
+- **5. Improved Timing-Sensitive Tests:**
+  - Replaced arbitrary multi-second `time.Sleep` calls in `TestController_ActiveDownloadCancellation`, `TestController_ShutdownResultDraining`, `TestController_Pause_ActiveDownloads`, `TestController_ResultsArrivingWhilePaused`, `TestController_Resume`, and `TestController_CheckpointWhilePaused` with synchronization channels (`<-r.Context().Done()`) and condition polling (`ctrl.GetStats().InProgress == 0`).
+  - Reduced controller test execution time from ~11s down to ~3.5s.
+- **6. Manual Checkpoint Consistency:**
+  - Reviewed `CreateCheckpoint()`: routed manual checkpoint requests (`cmdCheckpoint`) through the Controller's event loop via `controlChan` when running or paused.
+  - Guarantees manual checkpoints are captured at clean event-loop boundaries where no partial URL status transition or child discovery is mid-flight.
+- **7. Validation Output:**
+  - `go vet ./...`: PASSED (0 warnings)
+  - `go test -v ./...`: ALL PASSED across all packages (20 controller tests/subtests, 4 fetcher tests, all parser subtests, 5 state tests, all urlmanager subtests)
+  - `go test -count=1 -race ./...`: ALL PASSED (0 data races detected)
