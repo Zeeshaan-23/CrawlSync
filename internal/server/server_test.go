@@ -541,3 +541,168 @@ func TestServer_ShutdownDoesNotRaceWithConcurrentRequests(t *testing.T) {
 
 	wg.Wait()
 }
+
+// 15. HTTP shutdown deadline expiring while an HTTP handler is still active
+func TestServer_HTTPDrainTimeoutWhileHandlerActive(t *testing.T) {
+	inFlightStarted := make(chan struct{})
+
+	srv, _, _ := setupTestServer(t, func(c *ServerConfig) {
+		c.HTTPDrainTimeout = 50 * time.Millisecond // very short drain budget
+		c.HandlerWrapper = func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/slow" {
+					close(inFlightStarted)
+					time.Sleep(300 * time.Millisecond) // exceeds HTTPDrainTimeout
+					w.WriteHeader(http.StatusOK)
+					return
+				}
+				next.ServeHTTP(w, r)
+			})
+		}
+	})
+
+	if err := srv.Start(); err != nil {
+		t.Fatalf("failed starting server: %v", err)
+	}
+
+	// Send request to slow handler in background
+	go func() {
+		client := &http.Client{Timeout: 1 * time.Second}
+		resp, err := client.Get("http://" + srv.Addr() + "/slow")
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+
+	// Wait until handler is actively running
+	<-inFlightStarted
+
+	// Initiate shutdown
+	err := srv.Shutdown(context.Background())
+	if err == nil {
+		t.Errorf("expected shutdown error due to HTTP drain timeout")
+	}
+	if !strings.Contains(err.Error(), "http shutdown error") {
+		t.Errorf("expected error to mention http shutdown error, got: %v", err)
+	}
+}
+
+// 16. Crawler shutdown still being attempted and succeeding after HTTP shutdown times out
+func TestServer_CrawlerShutdownAttemptedAfterHTTPTimeout(t *testing.T) {
+	ts := createTestHTTPSite()
+	defer ts.Close()
+
+	inFlightStarted := make(chan struct{})
+
+	srv, svc, tempDir := setupTestServer(t, func(c *ServerConfig) {
+		c.HTTPDrainTimeout = 50 * time.Millisecond  // Short HTTP drain budget
+		c.CrawlerShutdownTimeout = 5 * time.Second  // Dedicated crawler shutdown budget
+		c.HandlerWrapper = func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/slow" {
+					close(inFlightStarted)
+					time.Sleep(300 * time.Millisecond) // deliberately outlasts HTTPDrainTimeout
+					w.WriteHeader(http.StatusOK)
+					return
+				}
+				next.ServeHTTP(w, r)
+			})
+		}
+	})
+
+	if err := srv.Start(); err != nil {
+		t.Fatalf("failed starting server: %v", err)
+	}
+
+	// 1. Start an active crawl session
+	startReqBody := fmt.Sprintf(`{"url": "%s/", "workers": 2, "max_pages": 50}`, ts.URL)
+	resp, err := http.Post("http://"+srv.Addr()+"/api/crawl/start", "application/json", strings.NewReader(startReqBody))
+	if err != nil || resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("failed starting crawl via API: %v", err)
+	}
+	_ = resp.Body.Close()
+
+	// 2. Start slow HTTP request
+	go func() {
+		client := &http.Client{Timeout: 1 * time.Second}
+		respSlow, errSlow := client.Get("http://" + srv.Addr() + "/slow")
+		if errSlow == nil {
+			_ = respSlow.Body.Close()
+		}
+	}()
+
+	<-inFlightStarted
+
+	// 3. Initiate server shutdown
+	// Phase 1 (HTTP draining) will time out, but Phase 2 (Crawler shutdown) MUST still run!
+	shutdownErr := srv.Shutdown(context.Background())
+	if shutdownErr == nil {
+		t.Errorf("expected shutdownErr to report HTTP drain timeout")
+	}
+
+	// 4. Verify that crawler shutdown was still attempted and succeeded!
+	finalStatus := svc.GetStatus()
+	if finalStatus.State != StateStopped && finalStatus.State != StateCompleted {
+		t.Errorf("expected crawler to be cleanly STOPPED or COMPLETED, got: %s", finalStatus.State)
+	}
+
+	// 5. Verify the shutdown checkpoint was successfully written to disk
+	cpPath := filepath.Join(tempDir, "checkpoints", state.CheckpointFileName)
+	if _, err := os.Stat(cpPath); os.IsNotExist(err) {
+		t.Errorf("expected shutdown checkpoint to exist at %s even after HTTP drain timeout", cpPath)
+	}
+}
+
+// 17. Repeated shutdown calls are safe and idempotent
+func TestServer_RepeatedShutdownCalls(t *testing.T) {
+	srv, _, _ := setupTestServer(t)
+
+	if err := srv.Start(); err != nil {
+		t.Fatalf("failed starting server: %v", err)
+	}
+
+	// First shutdown call
+	if err := srv.Shutdown(context.Background()); err != nil {
+		t.Errorf("first shutdown returned unexpected error: %v", err)
+	}
+
+	// Second shutdown call (idempotent no-op)
+	if err := srv.Shutdown(context.Background()); err != nil {
+		t.Errorf("second shutdown returned unexpected error: %v", err)
+	}
+
+	// Third shutdown call
+	if err := srv.Shutdown(context.Background()); err != nil {
+		t.Errorf("third shutdown returned unexpected error: %v", err)
+	}
+}
+
+// 18. Shutdown when no crawl is active
+func TestServer_ShutdownWhenNoCrawlActive(t *testing.T) {
+	srv, svc, tempDir := setupTestServer(t)
+
+	if err := srv.Start(); err != nil {
+		t.Fatalf("failed starting server: %v", err)
+	}
+
+	// Verify IDLE state
+	if svc.GetStatus().State != StateIdle {
+		t.Fatalf("expected IDLE state before shutdown, got %s", svc.GetStatus().State)
+	}
+
+	// Shutdown when IDLE
+	if err := srv.Shutdown(context.Background()); err != nil {
+		t.Errorf("unexpected error shutting down idle server: %v", err)
+	}
+
+	// Verify state remains IDLE
+	if svc.GetStatus().State != StateIdle {
+		t.Errorf("expected state to remain IDLE after shutdown, got %s", svc.GetStatus().State)
+	}
+
+	// Verify no checkpoint was created
+	cpPath := filepath.Join(tempDir, "checkpoints", state.CheckpointFileName)
+	if _, err := os.Stat(cpPath); err == nil {
+		t.Errorf("expected no checkpoint file to be created when idle")
+	}
+}

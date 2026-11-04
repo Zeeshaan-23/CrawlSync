@@ -413,7 +413,7 @@
     - When `--serve` is omitted: runs existing terminal crawler mode with 100% backward compatibility (seeds, workers, depth, `--resume`, `--retry-failed`, stats).
     - When `--serve` is specified: initializes `CrawlerService` without starting a Controller or worker pool upfront; starts HTTP server and blocks until SIGINT/SIGTERM triggers graceful shutdown.
 - **Automated Tests (`internal/server/server_test.go`):**
-  - 14 top-level test functions:
+  - 18 top-level test functions:
     1. `TestServer_Construction`: verifies valid construction, defaults, and error on nil service.
     2. `TestServer_RouteRegistration`: verifies routes are registered and respond properly.
     3. `TestServer_StartsSuccessfully`: verifies server starts and sets running flag.
@@ -428,9 +428,13 @@
     12. `TestServer_StartStopRepeatedlyNoGoroutineLeaks`: verifies server can start and stop across multiple cycles.
     13. `TestServer_ExistingMiddlewareRemainsActive`: verifies JSON headers, CORS preflight, and 405 Method Not Allowed.
     14. `TestServer_ShutdownDoesNotRaceWithConcurrentRequests`: runs 15 concurrent HTTP workers during server shutdown under race detector.
+    15. `TestServer_HTTPDrainTimeoutWhileHandlerActive`: verifies that slow/hanging HTTP handlers trigger a logged timeout error without hanging indefinitely.
+    16. `TestServer_CrawlerShutdownAttemptedAfterHTTPTimeout`: verifies that even if HTTP draining times out, Phase 2 still executes with its dedicated budget to stop the crawler and write the shutdown checkpoint.
+    17. `TestServer_RepeatedShutdownCalls`: verifies that repeated calls to `Server.Shutdown()` are safe and idempotent.
+    18. `TestServer_ShutdownWhenNoCrawlActive`: verifies that shutting down an idle server cleanly returns nil without creating empty checkpoints.
 - **Verification Output:**
   - `go vet ./...`: PASSED (0 warnings)
-  - `go test -v -count=1 ./internal/server/...`: ALL PASSED (55 top-level test functions, 15 subtests, 70 total test executions)
+  - `go test -v -count=1 ./internal/server/...`: ALL PASSED (59 top-level test functions, 15 subtests, 74 total test executions)
   - `go test -count=1 -race ./internal/server/...`: ALL PASSED (0 data races)
-  - `go test -count=1 -race ./...`: ALL PASSED across all packages (138 tests)
+  - `go test -count=1 -race ./...`: ALL PASSED across all packages (155 tests)
   - CLI binary build: `go build -o crawlsync.exe ./cmd/crawlsync` succeeded; verified `--help`, CLI mode, and `--serve` mode over live HTTP.

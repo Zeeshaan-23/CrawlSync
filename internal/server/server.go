@@ -18,6 +18,9 @@ const (
 	DefaultPort            = 8080
 	DefaultShutdownTimeout = 15 * time.Second
 
+	DefaultHTTPDrainTimeout       = 5 * time.Second
+	DefaultCrawlerShutdownTimeout = 10 * time.Second
+
 	DefaultReadHeaderTimeout = 5 * time.Second
 	DefaultReadTimeout       = 15 * time.Second
 	DefaultWriteTimeout      = 30 * time.Second
@@ -27,17 +30,20 @@ const (
 
 // ServerConfig configures the HTTP server lifecycle and underlying services.
 type ServerConfig struct {
-	Host              string
-	Port              int
-	EphemeralPort     bool // If true, allows binding to port 0 (OS allocates an available local port for testing)
-	Service           *CrawlerService
-	CORSOrigins       []string
-	ShutdownTimeout   time.Duration
-	ReadHeaderTimeout time.Duration
-	ReadTimeout       time.Duration
-	WriteTimeout      time.Duration
-	IdleTimeout       time.Duration
-	MaxHeaderBytes    int
+	Host                   string
+	Port                   int
+	EphemeralPort          bool // If true, allows binding to port 0 (OS allocates an available local port for testing)
+	Service                *CrawlerService
+	CORSOrigins            []string
+	ShutdownTimeout        time.Duration // Total default shutdown timeout
+	HTTPDrainTimeout       time.Duration // Dedicated timeout for draining HTTP connections
+	CrawlerShutdownTimeout time.Duration // Dedicated timeout for crawler persistence and checkpointing
+	ReadHeaderTimeout      time.Duration
+	ReadTimeout            time.Duration
+	WriteTimeout           time.Duration
+	IdleTimeout            time.Duration
+	MaxHeaderBytes         int
+	HandlerWrapper         func(http.Handler) http.Handler // Optional middleware hook (useful for testing slow handlers)
 }
 
 // Server encapsulates the HTTP server, listener, and service coordination.
@@ -83,6 +89,16 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		shutdownTimeout = DefaultShutdownTimeout
 	}
 
+	httpDrainTimeout := cfg.HTTPDrainTimeout
+	if httpDrainTimeout <= 0 {
+		httpDrainTimeout = DefaultHTTPDrainTimeout
+	}
+
+	crawlerShutdownTimeout := cfg.CrawlerShutdownTimeout
+	if crawlerShutdownTimeout <= 0 {
+		crawlerShutdownTimeout = DefaultCrawlerShutdownTimeout
+	}
+
 	readHeaderTimeout := cfg.ReadHeaderTimeout
 	if readHeaderTimeout <= 0 {
 		readHeaderTimeout = DefaultReadHeaderTimeout
@@ -119,12 +135,17 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		Service:     cfg.Service,
 		CORSOrigins: cfg.CORSOrigins,
 	})
+	if cfg.HandlerWrapper != nil {
+		handler = cfg.HandlerWrapper(handler)
+	}
 
 	bindAddr := net.JoinHostPort(host, strconv.Itoa(port))
 
 	cfg.Host = host
 	cfg.Port = port
 	cfg.ShutdownTimeout = shutdownTimeout
+	cfg.HTTPDrainTimeout = httpDrainTimeout
+	cfg.CrawlerShutdownTimeout = crawlerShutdownTimeout
 	cfg.ReadHeaderTimeout = readHeaderTimeout
 	cfg.ReadTimeout = readTimeout
 	cfg.WriteTimeout = writeTimeout
@@ -211,12 +232,13 @@ func (s *Server) Start() error {
 
 // Shutdown initiates graceful termination of the HTTP server and crawler service.
 //
-// DETERMINISTIC SHUTDOWN SEQUENCE:
-// 1. Closes the socket listener and refuses new incoming connections.
-// 2. Waits for all active in-flight HTTP request handlers to finish within the ctx deadline.
-// 3. Gracefully stops any active crawl session (signals controller, waits for workers to drain,
-//    and saves the final shutdown checkpoint).
-// 4. Returns combined errors if shutdown fails or times out.
+// DETERMINISTIC TWO-PHASE SHUTDOWN SEQUENCE:
+// 1. Phase 1 (HTTP Draining): Closes listener, disables keep-alives, and drains active in-flight
+//    HTTP request handlers within a dedicated HTTP drain window.
+// 2. Phase 2 (Crawler Engine & State Persistence): Regardless of whether Phase 1 succeeded or
+//    timed out, the active Crawler is guaranteed its own bounded window to signal workers,
+//    drain the results channel, commit the "shutdown" checkpoint, and cleanly stop.
+// 3. Combines and returns any shutdown errors or timeout notices.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.Lock()
 	if !s.running {
@@ -231,17 +253,61 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	var shutdownErr error
 
-	// 1. Stop accepting new HTTP requests and drain active handlers
-	if httpSrv != nil {
-		httpSrv.SetKeepAlivesEnabled(false)
-		if err := httpSrv.Shutdown(ctx); err != nil {
-			log.Printf("[HTTP Server WARN] HTTP server shutdown error: %v", err)
-			shutdownErr = errors.Join(shutdownErr, fmt.Errorf("http shutdown error: %w", err))
+	// Determine time budget for Phase 1 (HTTP draining).
+	httpDrainBudget := s.cfg.HTTPDrainTimeout
+	if httpDrainBudget <= 0 {
+		httpDrainBudget = DefaultHTTPDrainTimeout
+	}
+
+	// If caller passed a context with a deadline, cap the HTTP draining window
+	// so it cannot consume all available time. We preserve dedicated time for crawler persistence.
+	if deadline, ok := ctx.Deadline(); ok {
+		totalBudget := time.Until(deadline)
+		if totalBudget > 0 {
+			reservedForCrawler := s.cfg.CrawlerShutdownTimeout
+			if totalBudget > reservedForCrawler {
+				availableForHTTP := totalBudget - reservedForCrawler
+				if availableForHTTP < httpDrainBudget {
+					httpDrainBudget = availableForHTTP
+				}
+			} else {
+				// Very tight deadline: give at most half to HTTP draining so crawler is never starved
+				httpDrainBudget = totalBudget / 2
+			}
+		} else {
+			// Context is already expired; allow minimal non-blocking drain for HTTP
+			httpDrainBudget = 50 * time.Millisecond
 		}
 	}
 
-	// 2. Stop active crawl session, drain worker pool, and save final checkpoint
-	if err := s.service.Shutdown(ctx); err != nil {
+	// -------------------------------------------------------------
+	// Phase 1: Stop accepting new HTTP requests and drain active handlers
+	// -------------------------------------------------------------
+	if httpSrv != nil {
+		httpSrv.SetKeepAlivesEnabled(false)
+
+		httpCtx, httpCancel := context.WithTimeout(context.Background(), httpDrainBudget)
+		if err := httpSrv.Shutdown(httpCtx); err != nil {
+			log.Printf("[HTTP Server WARN] HTTP server shutdown error: %v", err)
+			shutdownErr = errors.Join(shutdownErr, fmt.Errorf("http shutdown error: %w", err))
+		}
+		httpCancel()
+	}
+
+	// -------------------------------------------------------------
+	// Phase 2: Dedicated crawler shutdown and checkpoint persistence
+	// Even if Phase 1 timed out or consumed its budget, the crawler
+	// is guaranteed its own dedicated bounded window to persist state!
+	// -------------------------------------------------------------
+	crawlerBudget := s.cfg.CrawlerShutdownTimeout
+	if crawlerBudget <= 0 {
+		crawlerBudget = DefaultCrawlerShutdownTimeout
+	}
+
+	crawlerCtx, crawlerCancel := context.WithTimeout(context.Background(), crawlerBudget)
+	defer crawlerCancel()
+
+	if err := s.service.Shutdown(crawlerCtx); err != nil {
 		log.Printf("[HTTP Server WARN] Crawler service shutdown error: %v", err)
 		shutdownErr = errors.Join(shutdownErr, fmt.Errorf("crawler service shutdown error: %w", err))
 	}
