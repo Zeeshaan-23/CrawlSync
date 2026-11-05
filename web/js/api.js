@@ -19,7 +19,7 @@ class CrawlSyncAPI {
   constructor(options = {}) {
     const savedBase = localStorage.getItem('crawlsync_api_base');
     // If running in browser served from server, default to relative root, else 127.0.0.1:8080
-    const defaultBase = (window.location.protocol.startsWith('http') && window.location.port === '8080')
+    const defaultBase = (typeof window !== 'undefined' && window.location && window.location.protocol && window.location.protocol.startsWith('http'))
       ? ''
       : 'http://127.0.0.1:8080';
 

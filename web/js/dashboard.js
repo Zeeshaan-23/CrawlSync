@@ -648,5 +648,14 @@ class DashboardController {
       this.refreshURLs();
     }
   }
+
+  /**
+   * Handle layout change (e.g. sidebar collapse/expand).
+   */
+  onLayoutChange() {
+    if (this.state.chartInstance) {
+      this.state.chartInstance.resize();
+    }
+  }
 }
 

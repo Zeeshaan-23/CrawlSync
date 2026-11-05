@@ -244,3 +244,90 @@ All endpoints in `internal/server/handlers.go` and `internal/server/handlers_url
      14. [x] URL Explorer server-side filtering, sorting, pagination, and detail lookup (`/api/urls/{id}`) verified.
 
 
+---
+
+## Stage 8.3: Collapsible Sidebar, Bottom Control Pill & Quality Review
+
+- **Date:** 2026-11-05
+- **Status:** Completed & Verified (Stage 8.3 UI Enhancements & Responsive Audit)
+- **Objective:** Implement an accessible collapsible sidebar with state persistence and off-canvas mobile drawer, migrate primary runtime controls to a fixed persistent bottom control pill, maintain existing button IDs and lifecycle state matrix, and perform a responsive visual audit across 1440px, 1024px, 768px, and 390px viewports.
+
+---
+
+### 1. Collapsible Sidebar Implementation
+
+1. **Desktop Collapse & Expand:**
+   - Accessible toggle button `#btn-toggle-sidebar` placed in `.sidebar-brand` with dynamic icon rotation (`❮` / `❯`), `aria-expanded`, and descriptive titles (`title="Collapse sidebar (Ctrl+B)"`).
+   - Smooth CSS width transition from 250px to 68px (`--sidebar-collapsed-width`).
+   - Navigation labels and brand text fade out smoothly (`opacity: 0`, `max-width: 0`) without causing layout instability or text wrapping.
+   - Navigation icons center cleanly with increased tap target padding.
+   - Dynamic CSS tooltips (`attr(data-tooltip)`) reveal item names on hover or keyboard `:focus-visible` in collapsed mode.
+   - Chart.js integration: triggers `dashboard.onLayoutChange()` after sidebar transition to smoothly resize charts without layout flicker.
+2. **Persistence:**
+   - State stored in `localStorage` under key `crawlsync_sidebar_collapsed`.
+   - Restored automatically on page initialization without flash of uncollapsed content.
+3. **Keyboard Accessibility:**
+   - Global keyboard shortcut: `Ctrl+B` / `Cmd+B` toggles the sidebar on desktop screens (>768px).
+   - High-contrast `:focus-visible` outline rings on all interactive elements.
+4. **Mobile Off-Canvas Drawer (≤768px):**
+   - Transformed into an off-canvas drawer with `transform: translateX(-100%)`.
+   - Hamburger menu toggle button (`#btn-mobile-menu`) added to `.app-header`.
+   - Mobile close button (`#btn-close-sidebar-mobile`) and backdrop overlay (`#sidebar-backdrop`) with `backdrop-filter: blur(4px)`.
+   - Tapping backdrop, clicking close button, selecting a navigation route, or pressing `Escape` closes the drawer automatically.
+
+---
+
+### 2. Persistent Bottom Floating Control Pill
+
+1. **Floating Pill Layout (`nav.bottom-control-pill`):**
+   - Fixed to viewport bottom: `bottom: calc(20px + env(safe-area-inset-bottom, 0px))`, centered horizontally (`left: 50%; transform: translateX(-50%)`).
+   - Surface design: glassmorphic elevated dark panel (`rgba(19, 23, 34, 0.90)`, `backdrop-filter: blur(16px)`), subtle border (`var(--border-medium)`), multi-tier shadow (`0 16px 36px -4px rgba(0, 0, 0, 0.70)`), and inner highlight.
+   - Main viewport bottom spacing: added `padding-bottom: calc(96px + env(safe-area-inset-bottom, 0px))` to `.dashboard-viewport` ensuring data tables and pagination are never obscured.
+2. **Button IDs & Lifecycle State Matrix:**
+   - Preserved all existing button IDs: `#btn-control-start`, `#btn-control-pause`, `#btn-control-resume`, `#btn-control-stop`, `#btn-control-checkpoint`.
+   - Preserved lifecycle state matrix:
+     - `IDLE` / `STOPPED` / `COMPLETED`: Start enabled; Pause, Resume, Stop, Checkpoint disabled.
+     - `RUNNING`: Pause, Stop, Checkpoint enabled; Start, Resume disabled.
+     - `PAUSED`: Resume, Stop, Checkpoint enabled; Start, Pause disabled.
+     - `STOPPING`: all controls disabled.
+3. **Visual Hierarchy:**
+   - **Start:** High-contrast primary indigo button with soft glow on hover.
+   - **Stop:** Distinct soft danger rose button (`var(--color-danger-subtle)`) turning solid danger red on hover, visually separated from destructive confusion.
+   - **Pause / Resume:** Distinct amber warning and emerald success pill accents.
+   - **Save Checkpoint:** Separated via a subtle vertical divider (`.pill-divider`) as a secondary snapshot action.
+4. **Responsive Mobile Pill:**
+   - On screens `<=480px` (e.g. 390px iPhone), extra label text is hidden (`.btn-label-extra { display: none; }`), displaying compact labels ("Start", "Pause", "Resume", "Stop", "Save") without horizontal overflow.
+5. **Toast & Modal Stacking:**
+   - Toast container positioned above the pill on mobile (`bottom: calc(84px + env(safe-area-inset-bottom, 0px))`).
+   - Modals render at `z-index: 1000`, cleanly above the floating pill (`z-index: 100`).
+
+---
+
+### 3. API Client Port Flexibility
+
+- **Bugfix in `web/js/api.js`:** Relaxed `defaultBase` check from strictly checking port `8080` to any HTTP protocol (`window.location.protocol.startsWith('http')`), allowing CrawlSync dashboard to communicate seamlessly when served on custom ports (e.g. `--port 8081` or `--port 9680`) without manual settings configuration.
+
+---
+
+### 4. Verification & Responsive Audit Results
+
+1. **JavaScript Syntax Verification:**
+   - Command: `node -c web/js/api.js; node -c web/js/components.js; node -c web/js/dashboard.js; node -c web/js/app.js`
+   - Result: **0 errors, 100% valid JavaScript**.
+2. **Go Backend Compatibility & Race Test:**
+   - Command: `go vet ./...` $\rightarrow$ 0 warnings.
+   - Command: `go test -count=1 -race ./...` $\rightarrow$ **ALL 159 TESTS PASSED** across all 6 packages with 0 data races.
+3. **End-to-End Integration Tests:**
+   - `test_dashboard_e2e.mjs`: **14 of 14 requirements passed**.
+   - `test_server_resume_e2e.mjs`: **Passed (server crash recovery & resumption verified)**.
+4. **Chrome DevTools Protocol (CDP) Real-Browser Audit:**
+   - Automated interactive test suite executed via Chrome headless:
+     - [x] **1440px Desktop Expanded:** Pass (no horizontal overflow, screenshot captured).
+     - [x] **1440px Desktop Collapsed:** Pass (sidebar collapse toggle, CSS tooltips, screenshot captured).
+     - [x] **Persistence Check:** Pass (reloaded page, verified sidebar remained collapsed from `localStorage`).
+     - [x] **1024px Tablet Landscape:** Pass (no horizontal overflow, screenshot captured).
+     - [x] **768px Tablet Portrait:** Pass (no horizontal overflow, screenshot captured).
+     - [x] **390px Mobile Viewport:** Pass (no horizontal overflow, compact pill buttons verified, screenshot captured).
+     - [x] **Mobile Drawer Navigation:** Pass (hamburger opens drawer, backdrop click closes drawer, screenshot captured).
+     - [x] **Lifecycle State Controls:** Pass (verified in live crawl: IDLE $\rightarrow$ RUNNING $\rightarrow$ PAUSED $\rightarrow$ RESUME $\rightarrow$ STOPPED).
+     - [x] **Overlay Non-Interference:** Pass (Start Crawl modal and floating toasts verified clear of bottom pill).

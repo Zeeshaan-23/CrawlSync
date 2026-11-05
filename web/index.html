@@ -21,43 +21,54 @@
   <link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
-  <div class="app-container">
+  <div class="app-container" id="app-container">
     
+    <!-- Mobile Off-Canvas Backdrop -->
+    <div class="sidebar-backdrop" id="sidebar-backdrop" aria-hidden="true"></div>
+
     <!-- ======================================================================
          Sidebar Navigation & Branding
          ====================================================================== -->
-    <aside class="app-sidebar" aria-label="Main Navigation">
+    <aside class="app-sidebar" id="app-sidebar" aria-label="Main Navigation">
       <div class="sidebar-brand">
-        <img src="assets/logo.svg" alt="CrawlSync Logo" class="brand-logo">
-        <div class="brand-text">
-          <span class="brand-title">CrawlSync</span>
-          <span class="brand-badge">Academic Console</span>
+        <div class="brand-info">
+          <img src="assets/logo.svg" alt="CrawlSync Logo" class="brand-logo">
+          <div class="brand-text">
+            <span class="brand-title">CrawlSync</span>
+            <span class="brand-badge">Academic Console</span>
+          </div>
         </div>
+        <button class="sidebar-toggle-btn" id="btn-toggle-sidebar" aria-label="Collapse sidebar" title="Collapse sidebar (Ctrl+B)" aria-expanded="true">
+          <span class="toggle-icon">&#10094;</span>
+        </button>
+        <button class="sidebar-close-mobile" id="btn-close-sidebar-mobile" aria-label="Close navigation menu" title="Close navigation menu">
+          &times;
+        </button>
       </div>
 
       <nav class="sidebar-nav">
-        <a href="#section-overview" class="sidebar-nav-item active" data-target="section-overview">
+        <a href="#section-overview" class="sidebar-nav-item active" data-target="section-overview" data-tooltip="Overview" aria-label="Overview">
           <span class="nav-icon">&#9638;</span>
-          <span>Overview</span>
+          <span class="nav-label">Overview</span>
         </a>
-        <a href="#section-workers" class="sidebar-nav-item" data-target="section-workers">
+        <a href="#section-workers" class="sidebar-nav-item" data-target="section-workers" data-tooltip="Worker Monitor" aria-label="Worker Monitor">
           <span class="nav-icon">&#9881;</span>
-          <span>Worker Monitor</span>
+          <span class="nav-label">Worker Monitor</span>
         </a>
-        <a href="#section-urls" class="sidebar-nav-item" data-target="section-urls">
+        <a href="#section-urls" class="sidebar-nav-item" data-target="section-urls" data-tooltip="URL Explorer" aria-label="URL Explorer">
           <span class="nav-icon">&#128279;</span>
-          <span>URL Explorer</span>
+          <span class="nav-label">URL Explorer</span>
         </a>
-        <a href="#settings" class="sidebar-nav-item" id="btn-open-settings">
+        <a href="#settings" class="sidebar-nav-item" id="btn-open-settings" data-tooltip="API Settings" aria-label="API Settings">
           <span class="nav-icon">&#9881;</span>
-          <span>API Settings</span>
+          <span class="nav-label">API Settings</span>
         </a>
       </nav>
 
       <div class="sidebar-footer">
-        <div class="connection-indicator-wrapper">
+        <div class="connection-indicator-wrapper" id="sidebar-connection-wrapper" data-tooltip="Connection Status">
           <span class="conn-indicator conn-offline" id="connection-status-badge"></span>
-          <span id="connection-status-text">Connecting...</span>
+          <span class="conn-text" id="connection-status-text">Connecting...</span>
         </div>
       </div>
     </aside>
@@ -70,6 +81,9 @@
       <!-- Top Header Bar -->
       <header class="app-header">
         <div class="header-left">
+          <button class="btn btn-secondary btn-icon-only mobile-menu-btn" id="btn-mobile-menu" aria-label="Open navigation menu" title="Open navigation">
+            <span>&#9776;</span>
+          </button>
           <div class="header-title-group">
             <h1 class="header-page-title">Monitoring Console</h1>
             <div id="header-state-badge">
@@ -111,38 +125,7 @@
       <div class="dashboard-viewport">
         
         <!-- ==================================================================
-             Section 1: Crawler Action Controls Bar
-             ================================================================== -->
-        <section class="controls-bar" aria-label="Crawler Controls">
-          <div class="controls-left">
-            <button class="btn btn-primary" id="btn-control-start">
-              <span>&#9654;</span>
-              <span>Start Crawl</span>
-            </button>
-            <button class="btn btn-warning" id="btn-control-pause" disabled>
-              <span>&#10074;&#10074;</span>
-              <span>Pause</span>
-            </button>
-            <button class="btn btn-success" id="btn-control-resume" disabled>
-              <span>&#9658;</span>
-              <span>Resume</span>
-            </button>
-            <button class="btn btn-danger" id="btn-control-stop" disabled>
-              <span>&#9632;</span>
-              <span>Stop</span>
-            </button>
-          </div>
-
-          <div class="controls-right">
-            <button class="btn btn-secondary" id="btn-control-checkpoint" disabled>
-              <span>&#128190;</span>
-              <span>Save Checkpoint</span>
-            </button>
-          </div>
-        </section>
-
-        <!-- ==================================================================
-             Section 2: High-Level Stat Cards Overview
+             Section 1: High-Level Stat Cards Overview
              ================================================================== -->
         <section id="section-overview" aria-label="Telemetry Overview">
           <div class="stats-grid">
@@ -389,6 +372,38 @@
         </section>
 
       </div>
+
+      <!-- ======================================================================
+           Persistent Bottom Floating Control Pill
+           ====================================================================== -->
+      <nav class="bottom-control-pill" id="bottom-control-pill" aria-label="Crawler Controls">
+        <div class="pill-group pill-group-actions">
+          <button class="btn btn-pill btn-primary" id="btn-control-start" aria-label="Start Crawl Session">
+            <span class="btn-icon">&#9654;</span>
+            <span class="btn-label">Start<span class="btn-label-extra"> Crawl</span></span>
+          </button>
+          <button class="btn btn-pill btn-warning" id="btn-control-pause" disabled aria-label="Pause Crawl Session">
+            <span class="btn-icon">&#10074;&#10074;</span>
+            <span class="btn-label">Pause</span>
+          </button>
+          <button class="btn btn-pill btn-success" id="btn-control-resume" disabled aria-label="Resume Crawl Session">
+            <span class="btn-icon">&#9658;</span>
+            <span class="btn-label">Resume</span>
+          </button>
+          <button class="btn btn-pill btn-danger" id="btn-control-stop" disabled aria-label="Stop Crawl Gracefully">
+            <span class="btn-icon">&#9632;</span>
+            <span class="btn-label">Stop</span>
+          </button>
+        </div>
+        <div class="pill-divider" role="separator" aria-orientation="vertical"></div>
+        <div class="pill-group pill-group-snapshot">
+          <button class="btn btn-pill btn-secondary" id="btn-control-checkpoint" disabled aria-label="Save Checkpoint Snapshot">
+            <span class="btn-icon">&#128190;</span>
+            <span class="btn-label">Save<span class="btn-label-extra"> Checkpoint</span></span>
+          </button>
+        </div>
+      </nav>
+
     </main>
 
   </div>

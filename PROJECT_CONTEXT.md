@@ -188,7 +188,7 @@ This is a target. Create folders only when a phase needs them.
 | 5 | Synchronization hardening, pause/resume via context | Verified |
 | 6 | Recovery: restore session, `in_progress` to `pending`, resume | Verified |
 | 7 | HTTP server + REST API (`/api/crawl/*`, `/api/urls/*`, `/api/workers`) | Verified |
-| 8 | Dashboard UI + live monitoring + controls | Verified |
+| 8 | Dashboard UI + live monitoring + controls (Stages 8.1, 8.2, 8.3 verified) | Verified |
 | 9 | Local test site, benchmark 1/2/4/8 workers, test docs | Planned |
 | 10 | Final docs and viva preparation (`OS_CONCEPTS.md` mapped to real code) | Planned |
 
