@@ -3,18 +3,201 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CrawlSync Test Website - Home</title>
+    <title>CrawlSync OS Testbed - Home</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            line-height: 1.6;
+            color: #24292f;
+            background: #f6f8fa;
+            margin: 0;
+            padding: 0;
+        }
+        header {
+            background: #24292f;
+            color: #ffffff;
+            padding: 16px 24px;
+        }
+        header .site-title {
+            font-size: 20px;
+            font-weight: 700;
+            margin: 0;
+        }
+        header nav {
+            margin-top: 10px;
+        }
+        header nav a {
+            color: #c9d1d9;
+            text-decoration: none;
+            margin-right: 16px;
+            font-size: 14px;
+            font-weight: 500;
+        }
+        header nav a:hover {
+            color: #ffffff;
+            text-decoration: underline;
+        }
+        main {
+            max-width: 900px;
+            margin: 32px auto;
+            background: #ffffff;
+            padding: 32px 40px;
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+        }
+        .category-badge {
+            display: inline-block;
+            background: #0969da;
+            color: #ffffff;
+            font-size: 12px;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 12px;
+            text-transform: uppercase;
+            margin-bottom: 8px;
+        }
+        h1 {
+            font-size: 28px;
+            color: #1f2328;
+            margin-top: 0;
+            margin-bottom: 12px;
+        }
+        .lead {
+            font-size: 16px;
+            color: #57606a;
+            margin-bottom: 24px;
+            border-bottom: 1px solid #d0d7de;
+            padding-bottom: 16px;
+        }
+        h2 {
+            font-size: 20px;
+            color: #1f2328;
+            margin-top: 24px;
+            margin-bottom: 12px;
+            border-bottom: 1px solid #eaeef2;
+            padding-bottom: 6px;
+        }
+        h3 {
+            font-size: 16px;
+            color: #24292f;
+            margin-top: 16px;
+            margin-bottom: 8px;
+        }
+        p, li, dd {
+            font-size: 15px;
+            color: #24292f;
+        }
+        ul, ol {
+            padding-left: 24px;
+            margin-bottom: 16px;
+        }
+        li {
+            margin-bottom: 6px;
+        }
+        a {
+            color: #0969da;
+            text-decoration: none;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+        pre {
+            background: #f6f8fa;
+            border: 1px solid #d0d7de;
+            padding: 12px 16px;
+            border-radius: 6px;
+            overflow-x: auto;
+            font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+            font-size: 13px;
+        }
+        code {
+            background: #eff1f3;
+            padding: 2px 5px;
+            border-radius: 4px;
+            font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+            font-size: 13px;
+        }
+        blockquote {
+            margin: 16px 0;
+            padding: 8px 16px;
+            border-left: 4px solid #0969da;
+            background: #f0f7ff;
+            color: #1f2328;
+            font-style: italic;
+        }
+        footer {
+            max-width: 900px;
+            margin: 24px auto 48px auto;
+            text-align: center;
+            font-size: 13px;
+            color: #57606a;
+        }
+        footer a {
+            margin: 0 8px;
+        }
+    </style>
 </head>
 <body>
-    <h1>Welcome to CrawlSync Test Website</h1>
-    <p>This local site is designed for testing CrawlSync concurrency, pause, resume, stop, and checkpointing.</p>
-    <nav>
-        <ul>
-            <li><a href="page1.html">Page 1: Architecture Overview</a></li>
-            <li><a href="page2.html">Page 2: Concurrency & Worker Pool</a></li>
-            <li><a href="page3.html">Page 3: Checkpointing & Recovery</a></li>
-        </ul>
-    </nav>
+    <header>
+        <div class="site-title">CrawlSync OS Testbed</div>
+        <nav>
+            <a href="index.html">Home</a>
+            <a href="about.html">About</a>
+            <a href="concurrency.html">Concurrency</a>
+            <a href="sync.html">Synchronization</a>
+            <a href="url-management.html">URL Management</a>
+            <a href="persistence.html">Persistence</a>
+            <a href="networking.html">Networking</a>
+            <a href="benchmarks.html">Benchmarks</a>
+            <a href="sitemap.html">Sitemap</a>
+        </nav>
+    </header>
+    <main>
+        <span class="category-badge">Home</span>
+        <h1>CrawlSync Operating Systems Testbed</h1>
+        <div class="lead">A concurrent web crawler testbed demonstrating multithreading, worker pools, synchronization, atomic persistence, and fault recovery.</div>
+        <section>
+            <h2>Explore OS Concepts in CrawlSync</h2>
+            <p>This test website hosts an interconnected collection of academic articles covering the core Operating Systems principles demonstrated by CrawlSync:</p>
+            <ul>
+                <li><strong><a href="concurrency.html">Concurrency & Threading</a>:</strong> Goroutines, OS threads, worker pools, and CSP message passing.</li>
+                <li><strong><a href="sync.html">Synchronization Primitives</a>:</strong> Mutexes, Reader-Writer locks, critical sections, and atomic operations.</li>
+                <li><strong><a href="url-management.html">URL Management & Traversal</a>:</strong> State tracking, deduplication, normalization, and graph traversal.</li>
+                <li><strong><a href="persistence.html">Persistence & Recovery</a>:</strong> Atomic checkpoints, crash safety, and uninterrupted state resumption.</li>
+                <li><strong><a href="networking.html">Networking & HTTP</a>:</strong> Connection pooling, SSRF prevention, timeouts, and HTML parsing.</li>
+            </ul>
+        </section>
+        <section>
+            <h2>Testing Utilities & Simulated Failure Points</h2>
+            <p>To exercise CrawlSync's error handling and edge cases, this site includes deliberate failure points:</p>
+            <ul>
+                <li><a href="nonexistent-page.html">Simulated 404 Page (Broken Link)</a> &mdash; verifies crawler error handling and failed status recording.</li>
+                <li><a href="missing-document.html">Missing Document 404</a> &mdash; secondary missing route for multi-worker error isolation.</li>
+                <li><a href="sitemap.html">Complete Sitemap</a> &mdash; full directory linking all site pages.</li>
+                <li><a href="benchmarks.html">Concurrency Benchmarks</a> &mdash; worker scalability analysis.</li>
+            </ul>
+        </section>
+        <section>
+            <h2>Legacy Verification Pages</h2>
+            <p>Original phase testing endpoints preserved for backward compatibility:</p>
+            <ul>
+                <li><a href="page1.html">Legacy Page 1: Architecture Overview</a></li>
+                <li><a href="page2.html">Legacy Page 2: Concurrency & Worker Pool</a></li>
+                <li><a href="page3.html">Legacy Page 3: Checkpointing & Recovery</a></li>
+                <li><a href="page4.html">Legacy Page 4: Crawl Leaf & Verification</a></li>
+            </ul>
+        </section>
+    </main>
+    <footer>
+        <p>CrawlSync Multithreaded Web Crawler &bull; Operating Systems Course Project</p>
+        <p>
+            <a href="index.html">Home</a> |
+            <a href="architecture.html">Architecture</a> |
+            <a href="references.html">References</a> |
+            <a href="resources.html">Resources</a> |
+            <a href="sitemap.html">Sitemap</a> |
+            <a href="nonexistent-page.html">Test 404 Link</a>
+        </p>
+    </footer>
 </body>
 </html>
-

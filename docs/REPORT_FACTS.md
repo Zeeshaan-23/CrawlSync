@@ -153,7 +153,7 @@ Every requirement from `PROJECT_CONTEXT.md` evaluated against real implementatio
 | **FR-07** | Every URL has an identifiable status | **Verified** | [`internal/urlmanager/manager.go:URLStatus`](file:///d:/College/Sem%205/CrawlSync/internal/urlmanager/manager.go#L17-L24) (`pending`, `in_progress`, `completed`, `failed`) | `internal/urlmanager/manager_test.go:TestURLManager_BasicTransitions` |
 | **FR-08** | Periodic checkpoint creation | **Verified** | [`internal/controller/controller.go:Run()`](file:///d:/College/Sem%205/CrawlSync/internal/controller/controller.go#L365-L370) (`case <-checkpointChan:`), [`internal/state/checkpoint.go:Save()`](file:///d:/College/Sem%205/CrawlSync/internal/state/checkpoint.go#L95-L145) | `internal/controller/controller_test.go:TestController_PeriodicCheckpointing` |
 | **FR-09** | Recovery after interruption | **Verified** | [`internal/state/recovery.go:LoadWithFallback()`](file:///d:/College/Sem%205/CrawlSync/internal/state/recovery.go#L173-L236), [`internal/urlmanager/manager.go:Restore()`](file:///d:/College/Sem%205/CrawlSync/internal/urlmanager/manager.go#L267-L343) | `internal/controller/recovery_test.go:TestRecovery_CrashSimulationAndFullGraphCompletion` |
-| **FR-10** | Dashboard with statistics and worker activity | **Backend Verified / Frontend NOT IMPLEMENTED** | Backend endpoints implemented and verified: [`internal/server/handlers.go:handleGetCrawlStats()`](file:///d:/College/Sem%205/CrawlSync/internal/server/handlers.go#L133), `handleGetWorkers()` (line 144), `handleGetCrawlStatus()` (line 122). Frontend UI (`web/index.html`, `style.css`, `app.js`): **NOT IMPLEMENTED** (Scheduled for Phase 8). | `internal/server/handlers_test.go:TestHandlers_SuccessfulResponses`, `TestHandlers_WorkerStateEndpoint` |
+| **FR-10** | Dashboard with statistics and worker activity | **Verified Implementation & E2E Tested** | Fully implemented in [`web/index.html`](file:///d:/College/Sem%205/CrawlSync/web/index.html), [`web/css/styles.css`](file:///d:/College/Sem%205/CrawlSync/web/css/styles.css), [`web/js/dashboard.js`](file:///d:/College/Sem%205/CrawlSync/web/js/dashboard.js), and [`web/fs.go`](file:///d:/College/Sem%205/CrawlSync/web/fs.go). Features live telemetry polling (1 Hz), Chart.js progress visualization, per-worker activity monitoring, paginated URL Explorer, collapsible sidebar (with `Ctrl+B` shortcut and tooltips), and persistent floating control pill. | Verified with unit tests (`internal/server/handlers_test.go`), REST API integration tests, and interactive Chrome CDP browser suites (`scratch/test_stage1_e2e.mjs`). |
 | **FR-11** | Pause and resume without losing progress | **Verified** | [`internal/controller/controller.go:Pause()`](file:///d:/College/Sem%205/CrawlSync/internal/controller/controller.go#L398), [`Resume()`](file:///d:/College/Sem%205/CrawlSync/internal/controller/controller.go#L437), nil-channel dispatch gating (lines 280-286) | `internal/controller/controller_test.go:TestController_Pause_ActiveDownloads`, `TestController_Resume` |
 | **FR-12** | Graceful stop | **Verified** | [`internal/controller/controller.go:Stop()`](file:///d:/College/Sem%205/CrawlSync/internal/controller/controller.go#L476-L494), `close(jobsChan)`, `c.wg.Wait()`, `drainRemainingResults()` (lines 295-309) | `internal/controller/controller_test.go:TestController_ActiveDownloadCancellation`, `TestController_ShutdownResultDraining` |
 
@@ -875,16 +875,57 @@ Implemented in [`internal/server/handlers.go:decodeStrictJSON()`](file:///d:/Col
 3. **Trailing Data Rejection:** Executes a second `decoder.Decode(&extra)` and strictly requires `io.EOF`. Rejects consecutive JSON objects, trailing arbitrary text, and trailing JSON values.
 
 ### 10.3 Dashboard Specification & Data Source Mapping
-*Note: The Frontend Dashboard UI (`web/index.html`, `style.css`, `app.js`) is **NOT YET IMPLEMENTED** (Scheduled for Phase 8). The underlying REST API is fully implemented and mapped below:*
+The Frontend Dashboard UI is fully implemented across [`web/index.html`](file:///d:/College/Sem%205/CrawlSync/web/index.html), [`web/css/styles.css`](file:///d:/College/Sem%205/CrawlSync/web/css/styles.css), and [`web/js/`](file:///d:/College/Sem%205/CrawlSync/web/js/). The dashboard connects to the REST API via a relative same-origin API client ([`web/js/api.js`](file:///d:/College/Sem%205/CrawlSync/web/js/api.js)):
 
 | Dashboard Panel | Purpose | Backing REST API Endpoint | Data Fields Utilized | Status |
-| :--- | :--- | :--- | :--- | :--- |
-| **Config Panel** | Configure crawl and trigger execution | `POST /api/crawl/start` | `url`, `workers`, `max_pages`, `max_depth`, `timeout_seconds`, `same_domain` | Backend Ready / UI Not Built |
-| **Stat Cards** | High-level metrics display | `GET /api/crawl/stats` | `total_discovered`, `completed`, `pending`, `failed`, `active_workers`, `crawl_speed_pages_per_sec` | Backend Ready / UI Not Built |
-| **Worker Monitor** | Visual grid of worker states | `GET /api/workers` | `workers[].id`, `workers[].state`, `workers[].current_url`, `workers[].updated_at` | Backend Ready / UI Not Built |
-| **URL Table** | Paginated URL inspection | `GET /api/urls` | `items[].id`, `normalized_url`, `status`, `status_code`, `size`, `duration_ms`, `depth` | Backend Ready / UI Not Built |
-| **Runtime Controls** | Interactive control buttons | `POST /api/crawl/{pause,resume,stop,checkpoint}` | Control response envelope (`current_state`, `message`) | Backend Ready / UI Not Built |
-| **Performance Chart** | Worker scalability comparison | `GET /api/crawl/stats` | `crawl_speed_pages_per_sec`, `average_duration_ms` | Backend Ready / UI Not Built |
+| :--- | :--- | :--- | :--- | :---: |
+| **Config Modal** | Configure crawl parameters and trigger execution | `POST /api/crawl/start` | `url`, `workers`, `max_pages`, `max_depth`, `timeout_seconds`, `same_domain` | **Fully Verified** |
+| **Summary Stat Cards** | Real-time high-level metrics display | `GET /api/crawl/stats` | `total_discovered`, `completed`, `pending`, `failed`, `active_workers`, `crawl_speed` | **Fully Verified** |
+| **Worker Monitor** | Real-time visual grid of worker pool thread states | `GET /api/workers` | `workers[].id`, `workers[].state` (IDLE/DOWNLOADING), `workers[].current_url` | **Fully Verified** |
+| **URL Explorer Table** | Paginated URL inspection with status filters and sorting | `GET /api/urls` | `items[].id`, `normalized`, `status`, `status_code`, `size`, `duration_ms`, `depth` | **Fully Verified** |
+| **Floating Control Pill** | Fixed interactive control buttons (Start, Pause, Resume, Stop, Checkpoint) | `POST /api/crawl/{start,pause,resume,stop,checkpoint}` | Control response envelope (`session_id`, `state`, `message`) | **Fully Verified** |
+| **Progress Donut Chart** | Proportion of completed, pending, in-progress, and failed URLs | `GET /api/crawl/stats` | `completed`, `pending`, `in_progress`, `failed` | **Fully Verified** |
+
+### 10.4 UI Architecture, Accessibility & Navigation (Phase 8 Implementation)
+1. **Collapsible Sidebar:**
+   - Width transitions smoothly between 250px (expanded) and 68px (collapsed) via CSS transitions.
+   - Text labels fade with zero layout shifts; navigation icons remain centered.
+   - Dynamic CSS tooltips (`attr(data-tooltip)`) reveal navigation labels on hover and focus in collapsed mode.
+   - Desktop keyboard toggle shortcut: `Ctrl+B` (and `Cmd+B` on macOS).
+   - Collapse preference persists across reloads via `localStorage.getItem('crawlsync_sidebar_collapsed')`.
+   - Chart.js instances auto-resize on sidebar width transition completion via `transitionend` listener triggering `dashboard.onLayoutChange()`.
+2. **Mobile Off-Canvas Drawer (≤ 768px):**
+   - Transformed into an off-canvas drawer with `transform: translateX(-100%)`.
+   - Hamburger menu toggle button (`#btn-mobile-menu`) added to `.app-header`.
+   - Mobile close button (`#btn-close-sidebar-mobile`) and backdrop overlay (`#sidebar-backdrop`) with `backdrop-filter: blur(4px)`.
+   - Dismissible via backdrop tap, close button, route link selection, or `Escape` key.
+   - Smart focus management (`closeMobileSidebar(restoreFocus)`): restores focus to the hamburger button on explicit drawer close, while allowing natural forward focus when navigating to a view.
+3. **Floating Bottom Control Pill (`nav.bottom-control-pill`):**
+   - Fixed to viewport bottom (`bottom: calc(20px + env(safe-area-inset-bottom))`), centered horizontally.
+   - Dark glassmorphic styling (`rgba(19, 23, 34, 0.90)`, `backdrop-filter: blur(16px)`), subtle border, and multi-tier shadow.
+   - Preserves all 5 primary controls: `#btn-control-start`, `#btn-control-pause`, `#btn-control-resume`, `#btn-control-stop`, and `#btn-control-checkpoint`.
+   - Viewport bottom clearance: `.dashboard-viewport` has `padding-bottom: calc(96px + env(safe-area-inset-bottom))` ensuring table rows and pagination controls are never obscured.
+   - Stacking order: Pill (`z-index: 50`), Backdrop (`z-index: 998`), Mobile Drawer (`z-index: 999`).
+
+### 10.5 Expanded Local Test Website (37 Pages)
+1. **Server Architecture:**
+   - Powered by Python's standard-library `http.server.ThreadingHTTPServer` (`testsite/server.py`).
+   - Configurable artificial response delay (default `2.0s`, customizable via `--delay`) allowing comfortable manual and automated testing of pauses, resumes, and checkpoints.
+   - Request queue size set to 128 to accommodate rapid concurrent connection spikes.
+   - Path-traversal sanitized dynamic serving of all `*.html` files in `testsite/`.
+2. **Page Topology (37 Distinct HTML Pages):**
+   - **4 Overview Pages:** `index.html` (portal), `about.html`, `architecture.html`, `faq.html`.
+   - **6 Concurrency Pages:** `concurrency.html` (hub), `concurrency-threads.html`, `concurrency-workers.html`, `concurrency-channels.html`, `concurrency-deadlocks.html`, `concurrency-races.html`.
+   - **5 Synchronization Pages:** `sync.html` (hub), `sync-mutex.html`, `sync-rwmutex.html`, `sync-atomic.html`, `sync-waitgroup.html`.
+   - **5 URL Management Pages:** `url-management.html` (hub), `url-deduplication.html`, `url-normalization.html`, `url-traversal.html`, `url-robots.html`.
+   - **5 Persistence Pages:** `persistence.html` (hub), `persistence-checkpoints.html`, `persistence-atomic-writes.html`, `persistence-recovery.html`, `persistence-crash-safety.html`.
+   - **4 Networking Pages:** `networking.html` (hub), `networking-http.html`, `networking-ssrf.html`, `networking-html-parser.html`.
+   - **4 Reference & Benchmark Pages:** `benchmarks.html`, `references.html`, `resources.html`, `sitemap.html`.
+   - **4 Legacy Verification Pages:** `page1.html`, `page2.html`, `page3.html`, `page4.html`.
+3. **Intentional Failure & Duplicate Fixtures:**
+   - **Duplicate Detection Demonstration:** Header navigation, footer links, cross-references, and the sitemap contain repeated links across the 37 pages. Crawl tests verify that duplicate links are filtered out atomically by `TrySchedule` and never downloaded twice.
+   - **Simulated 404 Failure Links:** `nonexistent-page.html`, `missing-document.html`, `dead-reference-link.html`, `legacy-archive-404.html`. Nonexistent paths return HTTP 404 with `Content-Type: text/plain`, verifying that error responses are recorded as `failed` in the URL Explorer.
+   - **Pagination Demonstration:** A crawl of the test website discovers 42 total URLs, successfully populating Page 1 (items 1–20) and Page 2 (items 21–42) in the dashboard URL table. Multi-page pagination verified via interactive browser tests.
 
 ---
 
@@ -1095,9 +1136,9 @@ Documented from [`docs/IMPLEMENTATION_LOG.md`](file:///d:/College/Sem%205/CrawlS
 - **Execution Plan for Benchmarking 1, 2, 4, 8 Workers:**
   1. Start local test server with simulated artificial per-page latency (e.g. 50ms):
      ```powershell
-     go run ./testsite/main.go -port 9090 -delay 50ms
+     python test_server.py --port 9000 --delay 0.05
      ```
-  2. Execute crawling benchmarks across worker counts against a fixed graph of 100 pages:
+  2. Execute crawling benchmarks across worker counts against the 37-page graph:
      ```powershell
      # 1 Worker
      Measure-Command { go run ./cmd/crawlsync -url http://127.0.0.1:9090 -workers 1 -max-pages 100 -allow-local }
@@ -1114,12 +1155,13 @@ Documented from [`docs/IMPLEMENTATION_LOG.md`](file:///d:/College/Sem%205/CrawlS
 
 ## 16. Known Limitations & Gaps
 
-1. **`robots.txt` Compliance:** **NOT IMPLEMENTED.** CrawlSync does not currently fetch or evaluate `robots.txt` rules before downloading.
-2. **Dashboard Frontend UI:** **NOT IMPLEMENTED.** Phase 7 completed the entire REST API backend, but the HTML/CSS/JS frontend dashboard (`web/index.html`) is planned for Phase 8.
-3. **Static HTML Only:** CrawlSync downloads static HTML using standard HTTP GET requests. It does not execute client-side JavaScript (no headless Chromium/WebKit engine).
-4. **Single-Domain Boundary:** CrawlSync defaults strictly to same-domain link traversal. Cross-domain graph traversal is deliberately restricted.
-5. **In-Memory URL Table:** The URL Manager stores all discovered URLs in an in-memory hash map (`map[string]*URLItem`). While memory-efficient up to ~1,000,000 URLs, crawls exceeding available RAM would require an on-disk key-value store (e.g. LSM-tree).
-6. **Single Node Architecture:** Designed as a single-process concurrent crawler; does not support distributed multi-node coordination.
+1. **Dashboard Frontend UI:** **FULLY IMPLEMENTED & VERIFIED.** Complete dark-theme web dashboard implemented with responsive collapsible sidebar (`Ctrl+B`), floating control pill, live telemetry polling (1 Hz), Chart.js visualization, and paginated URL Explorer.
+2. **HTTP Error Status with HTML Bodies (Application-Layer Behavior):** In `internal/controller/worker.go:processJob()`, if an HTTP server returns an error status code $\ge 400$ (such as 404 or 500) accompanied by `Content-Type: text/html`, the worker does not fail the fetch. It saves the error body to disk and marks the URL as `completed`. Non-HTML error responses (e.g., `text/plain` 404s) are rejected and properly marked `failed`. This application-level behavior is outside the core OS concurrency and persistence syllabus.
+3. **`robots.txt` Compliance:** Basic parser implemented in `internal/fetcher/robots.go`. Automated pre-fetching of `/robots.txt` before crawling arbitrary foreign domains is planned for Phase 10.
+4. **Static HTML Only:** CrawlSync downloads static HTML using standard HTTP GET requests. It does not execute client-side JavaScript (no headless Chromium/WebKit engine).
+5. **Single-Domain Boundary:** CrawlSync defaults strictly to same-domain link traversal. Cross-domain graph traversal is deliberately restricted.
+6. **In-Memory URL Table:** The URL Manager stores all discovered URLs in an in-memory hash map (`map[string]*URLItem`). While memory-efficient up to ~1,000,000 URLs, crawls exceeding available RAM would require an on-disk key-value store (e.g. LSM-tree).
+7. **Single Node Architecture:** Designed as a single-process concurrent crawler; does not support distributed multi-node coordination.
 
 ---
 

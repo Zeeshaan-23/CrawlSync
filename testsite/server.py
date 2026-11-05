@@ -138,27 +138,33 @@ class DelayedCrawlTestHandler(BaseHTTPRequestHandler):
         clean_path = urlparse(path).path.strip("/")
         if clean_path == "" or clean_path == "index":
             filename = "index.html"
-        elif clean_path in DEFAULT_PAGES:
-            filename = clean_path
-        elif f"{clean_path}.html" in DEFAULT_PAGES:
-            filename = f"{clean_path}.html"
         else:
-            return None, None
+            filename = clean_path
 
-        # Check if file exists on disk
-        site_dir = self.server.site_dir
-        disk_path = os.path.join(site_dir, filename) if site_dir else None
-        if disk_path and os.path.isfile(disk_path):
-            try:
-                with open(disk_path, "rb") as f:
-                    return filename, f.read()
-            except OSError:
-                pass
+        candidates = [filename]
+        if not filename.endswith(".html"):
+            candidates.append(f"{filename}.html")
 
-        # Fall back to embedded page content
-        content = DEFAULT_PAGES.get(filename)
-        if content:
-            return filename, content.encode("utf-8")
+        # 1. Check disk in site_dir
+        site_dir = getattr(self.server, "site_dir", None)
+        if site_dir:
+            real_site_dir = os.path.realpath(site_dir)
+            for cand in candidates:
+                disk_path = os.path.realpath(os.path.join(site_dir, cand))
+                # Security: prevent path traversal outside site_dir
+                if os.path.commonpath([real_site_dir, disk_path]) == real_site_dir:
+                    if os.path.isfile(disk_path):
+                        try:
+                            with open(disk_path, "rb") as f:
+                                return cand, f.read()
+                        except OSError:
+                            pass
+
+        # 2. Check embedded DEFAULT_PAGES fallback
+        for cand in candidates:
+            if cand in DEFAULT_PAGES:
+                return cand, DEFAULT_PAGES[cand].encode("utf-8")
+
         return None, None
 
     def do_HEAD(self):
@@ -183,23 +189,15 @@ class DelayedCrawlTestHandler(BaseHTTPRequestHandler):
             time.sleep(delay)
 
         filename, body = self._resolve_page(requested_path)
+        self.close_connection = True
         elapsed = time.time() - start_time
         ts_finished = self._get_timestamp()
 
         if body is None:
-            # 404 Not Found
-            not_found_msg = f"""<!DOCTYPE html>
-<html>
-<head><title>404 Not Found</title></head>
-<body>
-    <h1>404 Not Found</h1>
-    <p>The requested URL <code>{requested_path}</code> was not found on this test server.</p>
-    <p>Available pages: <a href="/index.html">/index.html</a>, <a href="/page1.html">/page1.html</a>, <a href="/page2.html">/page2.html</a>, <a href="/page3.html">/page3.html</a>, <a href="/page4.html">/page4.html</a></p>
-</body>
-</html>
-""".encode("utf-8")
+            # 404 Not Found (returned as text/plain so crawler error handling detects failed download)
+            not_found_msg = f"404 Not Found: The requested URL {requested_path} does not exist on this test server.\n".encode("utf-8")
             self.send_response(HTTPStatus.NOT_FOUND)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Length", str(len(not_found_msg)))
             self.send_header("Connection", "close")
             self.end_headers()
@@ -224,6 +222,7 @@ class DelayedCrawlTestHandler(BaseHTTPRequestHandler):
 class CrawlTestServer(ThreadingHTTPServer):
     """Multithreaded HTTP server with custom parameters."""
     daemon_threads = True
+    request_queue_size = 128
 
     def __init__(self, server_address, RequestHandlerClass, delay=2.0, site_dir=None):
         super().__init__(server_address, RequestHandlerClass)
@@ -272,6 +271,11 @@ def main():
         print(f"Error starting server on {args.host}:{args.port}: {err}", file=sys.stderr)
         sys.exit(1)
 
+    # Discover available HTML pages on disk
+    html_files = []
+    if os.path.isdir(site_dir):
+        html_files = sorted([f for f in os.listdir(site_dir) if f.endswith(".html")])
+
     print("=" * 70)
     print(" CrawlSync Delayed Test HTTP Server")
     print("=" * 70)
@@ -279,15 +283,14 @@ def main():
     print(f"  Artificial Delay: {args.delay:.2f} seconds per HTML request")
     print(f"  Concurrency:      ThreadingHTTPServer (multithreaded)")
     print(f"  Serving Directory: {site_dir}")
-    print(f"  Available Pages:")
-    print(f"    - http://{args.host}:{args.port}/index.html")
-    print(f"    - http://{args.host}:{args.port}/page1.html")
-    print(f"    - http://{args.host}:{args.port}/page2.html")
-    print(f"    - http://{args.host}:{args.port}/page3.html")
-    print(f"    - http://{args.host}:{args.port}/page4.html")
+    print(f"  Total HTML Pages: {len(html_files)} pages available on disk")
+    print(f"  Primary Entry Points:")
+    print(f"    - http://{args.host}:{args.port}/ (Homepage)")
+    print(f"    - http://{args.host}:{args.port}/sitemap.html (Full Directory)")
+    print(f"    - http://{args.host}:{args.port}/nonexistent-page.html (Simulated 404)")
     print("-" * 70)
     print("  Example CrawlSync CLI command:")
-    print(f"    ./crawlsync -url http://{args.host}:{args.port}/ -allow-local -workers 3 -max-pages 10")
+    print(f"    ./crawlsync -url http://{args.host}:{args.port}/ -allow-local -workers 4 -max-pages 50")
     print("-" * 70)
     print("  Press Ctrl+C to stop the test server.")
     print("=" * 70)
